@@ -249,6 +249,18 @@ def with_gpt_oss(team: list[Agent], usable: list[ProviderCheck], candidates: lis
     return team
 
 
+def fallback_provider(agent: Agent, roster: list[Agent]) -> tuple[str, str] | None:
+    """Where to move an agent whose provider keeps refusing: another provider that passed the
+    startup check, preferring the one with the fewest agents (spreads the free-tier load).
+    Uses only the cached check, so it never blocks the event loop on the network."""
+    usable = [c for c in (_checks or []) if c.ok and c.id != agent.provider and c.model]
+    if not usable:
+        return None
+    load = {c.id: sum(a.provider == c.id for a in roster) for c in usable}
+    best = min(usable, key=lambda c: (load[c.id], AUTO_ORDER.index(c.id)))
+    return best.id, best.model
+
+
 _UNSET = object()
 MAX_HUMAN_MESSAGE = 20_000
 
@@ -271,7 +283,9 @@ def create_app(
 
     def get_room(room_id: str) -> Room:
         if room_id not in rooms:
-            room = Room(room_id, default_roster(), shared_backend, searcher=shared_searcher, on_change=save)
+            room = Room(
+                room_id, default_roster(), shared_backend, searcher=shared_searcher, on_change=save, fallback=fallback_provider
+            )
             saved = store.load(room_id)
             if saved:
                 room.load_state(saved)

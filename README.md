@@ -100,6 +100,10 @@ How non-Claude agents work:
   one per second, so it's paced from the start); any provider that answers "429 slow down" is
   automatically slowed further, honouring `Retry-After`, then eased back. A rate-limited speaker
   gets a second try after a short pause instead of being skipped.
+- **Provider fallback.** If the second try is refused too, that provider is out for a while, so
+  the agent moves to another provider that passed the startup check (the one with the fewest
+  agents), with a notice in the chat. Use **[edit]** to move them back later. When a speaker
+  can't answer at all, the others pick up the thread instead of waiting for them.
 - **Automatic model switching.** Each free model has its own daily quota. When one runs out (a
   429 whose wait is hours, or a "tokens per day" limit), that agent moves to another chat model
   from the same provider, the chat shows `Bo switched to …`, and the reply carries on. A short

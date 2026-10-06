@@ -34,6 +34,11 @@ MAX_AGENTS = 8
 MAX_TURNS_LIMIT = 50
 
 
+# After a speaker fails, the best remaining bid only needs this much to cover for them
+# (otherwise everyone politely waits for the missing agent and the room falls silent).
+COVER_THRESHOLD = 0.15
+
+
 @dataclass
 class RoomSettings:
     speak_threshold: float = 0.35  # minimum adjusted score to take the floor
@@ -86,6 +91,7 @@ class Room:
         settings: RoomSettings | None = None,
         searcher: Searcher | None = None,
         on_change: Callable[["Room"], None] | None = None,
+        fallback: Callable[[Agent, list[Agent]], tuple[str, str] | None] | None = None,
     ):
         self.id = room_id
         self.agents = agents
@@ -93,6 +99,8 @@ class Room:
         self.settings = settings or RoomSettings()
         self.searcher = searcher
         self.on_change = on_change  # persistence hook: called after every durable change
+        # (provider, model) to move an agent to when its own provider keeps refusing; None = stay put
+        self.fallback = fallback
         self.messages: list[Message] = []
         self.whiteboard = ""
         self.whiteboard_by: str | None = None
@@ -398,6 +406,7 @@ class Room:
     async def _conversation_loop(self, nudge: bool = False) -> None:
         self._emit({"type": "status", "state": "running"})
         sitting_out: set[str] = set()  # agents whose provider failed (or who said nothing) this round
+        covering = False  # the last chosen speaker failed: someone else should pick up the thread
         try:
             for turn in range(self.settings.max_agent_turns):
                 mentioned = self._mentioned_agent(sitting_out)
@@ -422,7 +431,9 @@ class Room:
                         await asyncio.sleep(wait)
                         self._emit({"type": "status", "state": "bidding"})
                         bids = await self.collect_bids(sitting_out, nudge=first_nudge)
-                winner = bids[0] if bids and bids[0].score >= self.settings.speak_threshold else None
+                bar = min(self.settings.speak_threshold, COVER_THRESHOLD) if covering else self.settings.speak_threshold
+                covering = False
+                winner = bids[0] if bids and not _failed(bids[0].bid) and bids[0].score >= bar else None
                 self._emit(
                     {
                         "type": "bids",
@@ -442,6 +453,7 @@ class Room:
                     if getattr(e, "temporary", False):
                         text += " Sitting out this round; they'll be back."
                     self._emit({"type": "error", "agent": winner.agent.name, "text": text[:300]})
+                    covering = True
                     continue
                 if not said:
                     # An empty reply would leave the room unchanged and the same agent could win
@@ -502,7 +514,31 @@ class Room:
             self._emit({"type": "status", "state": "waiting"})
             await asyncio.sleep(wait)
             self._emit({"type": "status", "state": "running"})
-            return await self._speak(agent)
+            try:
+                return await self._speak(agent)
+            except Exception as again:
+                if not getattr(again, "temporary", False):
+                    raise
+                # Still refused after a pause: that provider is out for a while (free tiers can
+                # throttle for minutes). Keep the agent in the conversation on another provider.
+                moved = self._move_provider(agent, f"{PROVIDERS[agent.provider].label} keeps rate-limiting")
+                if moved is None:
+                    raise
+                return await self._speak(moved)
+
+    def _move_provider(self, agent: Agent, reason: str) -> Agent | None:
+        current = next((a for a in self.agents if a.name == agent.name), None)
+        target = self.fallback(current, self.agents) if (self.fallback and current) else None
+        if target is None:
+            return None
+        provider, model = target
+        moved = dataclasses.replace(current, provider=provider, model=model)
+        self.agents = [moved if a.name == agent.name else a for a in self.agents]
+        self._roster_changed(
+            f"{agent.name} moved to {PROVIDERS[provider].label} ({moved.model_id}): {reason}. "
+            f"Use [edit] to move them back later."
+        )
+        return moved
 
     async def _switch_model(self, agent: Agent, reason: str) -> Agent | None:
         """Move an agent whose model ran out of free quota to another model from the same

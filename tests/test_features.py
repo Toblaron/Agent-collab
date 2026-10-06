@@ -468,3 +468,72 @@ def test_rename_notice_comes_after_history_refresh():
     room.apply_great_minds()
     kinds = [e["type"] for e in [q.get_nowait() for _ in range(q.qsize())]]
     assert kinds.index("history") < kinds.index("notice")  # the UI wipes the log on history
+
+
+class Throttled(Scripted):
+    """Every request to Mistral is refused; everything else works."""
+
+    async def speak(self, agent, roster, transcript, whiteboard=""):
+        from agent_collab.llm import ProviderError
+
+        self.spoke.append(f"{agent.name}@{agent.provider}")
+        if agent.provider == "mistral":
+            raise ProviderError("Mistral is rate-limiting requests right now", temporary=True)
+        yield f"{agent.name} here, via {agent.provider}"
+
+
+def test_agent_moves_provider_when_its_own_keeps_rate_limiting():
+    import dataclasses
+
+    curie = dataclasses.replace(A, name="Curie", provider="mistral", model="mistral-small-latest")
+
+    async def go():
+        room = Room("r", [curie, B], Throttled(), RoomSettings(max_agent_turns=1, speak_retry_wait=0.01),
+                    fallback=lambda agent, roster: ("groq", "openai/gpt-oss-120b"))
+        q = room.subscribe()
+        await room.post_human("@Curie what do you think?")
+        await room.wait_idle()
+        return room, [q.get_nowait() for _ in range(q.qsize())]
+
+    room, events = run(go())
+    assert room.messages[-1].author == "Curie" and room.messages[-1].text == "Curie here, via groq"
+    assert room.agents[0].provider == "groq" and room.agents[0].model == "openai/gpt-oss-120b"
+    note = next(e["text"] for e in events if e["type"] == "notice" and "moved to" in e["text"])
+    assert note.startswith("Curie moved to Groq (openai/gpt-oss-120b): Mistral keeps rate-limiting")
+    assert not any(e["type"] == "error" for e in events)
+
+
+def test_someone_covers_when_the_asked_agent_cant_answer():
+    import dataclasses
+
+    curie = dataclasses.replace(A, name="Curie", provider="mistral")
+    # B is polite: it would normally wait for Curie (0.2 < 0.35), but Curie is out this round
+    backend = Throttled(urgency={"B": 0.2})
+
+    async def go():
+        room = Room("r", [curie, B], backend, RoomSettings(max_agent_turns=3, speak_retry_wait=0.01, dominance_penalty=0))
+        q = room.subscribe()
+        await room.post_human("@Curie what do you think?")
+        await room.wait_idle()
+        return room, [q.get_nowait() for _ in range(q.qsize())]
+
+    room, events = run(go())
+    assert any(e["type"] == "error" and e["agent"] == "Curie" for e in events)  # no fallback configured
+    assert room.messages[-1].author == "B"  # the room didn't go quiet
+
+
+def test_fallback_provider_spreads_load_and_skips_the_failing_one(monkeypatch):
+    import dataclasses
+
+    from agent_collab import server
+    from agent_collab.server import ProviderCheck
+
+    monkeypatch.setattr(server, "_checks", [
+        ProviderCheck("gemini", True, "flash-lite", ""), ProviderCheck("groq", True, "openai/gpt-oss-120b", ""),
+        ProviderCheck("mistral", True, "mistral-small-latest", ""), ProviderCheck("openai", False, None, "no key"),
+    ])
+    team = [dataclasses.replace(A, name=n, provider=p) for n, p in
+            [("T", "gemini"), ("Te", "gemini"), ("S", "groq"), ("Curie", "mistral")]]
+    assert server.fallback_provider(team[3], team) == ("groq", "openai/gpt-oss-120b")  # groq has fewer agents
+    monkeypatch.setattr(server, "_checks", None)
+    assert server.fallback_provider(team[3], team) is None  # no check yet: stay put
