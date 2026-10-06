@@ -16,12 +16,13 @@ from pathlib import Path
 import httpx
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 
 from .agents import DEFAULT_ROSTER, EXTRA_ROSTER, Agent, AgentError
 from .llm import Backend, MockBackend, RoutingBackend
 from .providers import PROVIDERS, auth_headers, list_models
 from .room import HUMAN, Room
+from .rooms import RoomStore, export_markdown, valid_room_id
 from .search import Searcher, make_searcher
 from .teams import TeamError, TeamStore
 
@@ -243,25 +244,37 @@ def default_roster() -> list[Agent]:
 
 
 _UNSET = object()
+MAX_HUMAN_MESSAGE = 20_000
 
 
 def create_app(
-    backend: Backend | None = None, searcher: Searcher | None | object = _UNSET, teams: TeamStore | None = None
+    backend: Backend | None = None,
+    searcher: Searcher | None | object = _UNSET,
+    teams: TeamStore | None = None,
+    room_store: RoomStore | None = None,
 ) -> FastAPI:
     app = FastAPI(title="agent-collab")
     rooms: dict[str, Room] = {}
     shared_backend = backend or make_backend()
     shared_searcher = make_searcher() if searcher is _UNSET else searcher
     team_store = teams or TeamStore()
+    store = room_store or RoomStore()
+
+    def save(room: Room) -> None:
+        store.save(room.to_state())
 
     def get_room(room_id: str) -> Room:
         if room_id not in rooms:
-            rooms[room_id] = Room(room_id, default_roster(), shared_backend, searcher=shared_searcher)
+            room = Room(room_id, default_roster(), shared_backend, searcher=shared_searcher, on_change=save)
+            saved = store.load(room_id)
+            if saved:
+                room.load_state(saved)
+            rooms[room_id] = room
         return rooms[room_id]
 
     @app.get("/")
     async def index() -> FileResponse:
-        return FileResponse(STATIC / "index.html")
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/healthz")
     async def healthz() -> dict:
@@ -277,11 +290,47 @@ def create_app(
             "search": shared_searcher.name if shared_searcher else None,
             "mock": isinstance(shared_backend, MockBackend),
             "teams_dir": str(team_store.dir),
+            "rooms_dir": str(store.dir),
         }
 
     @app.get("/api/teams")
     async def list_teams() -> list[dict]:
         return team_store.list()
+
+    @app.get("/api/rooms")
+    async def list_rooms() -> list[dict]:
+        listed = {r["id"]: r for r in store.list()}
+        for room in rooms.values():  # live state beats what's on disk (e.g. a room that's mid-reply)
+            if room.messages:
+                listed[room.id] = {
+                    "id": room.id, "title": room.title, "updated_at": room.updated_at,
+                    "messages": len(room.messages), "agents": [a.name for a in room.agents],
+                    "running": room.running,
+                }
+        return sorted(listed.values(), key=lambda r: r["updated_at"], reverse=True)
+
+    @app.get("/api/rooms/{room_id}/export.md")
+    async def export_room(room_id: str) -> PlainTextResponse:
+        if not valid_room_id(room_id):
+            raise HTTPException(400, "invalid room id")
+        state = rooms[room_id].to_state() if room_id in rooms else store.load(room_id)
+        if not state:
+            raise HTTPException(404, "no such room")
+        return PlainTextResponse(
+            export_markdown(state),
+            media_type="text/markdown; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="agent-collab-{room_id}.md"'},
+        )
+
+    @app.delete("/api/rooms/{room_id}")
+    async def delete_room(room_id: str) -> dict:
+        if not valid_room_id(room_id):
+            raise HTTPException(400, "invalid room id")
+        room = rooms.pop(room_id, None)
+        if room:
+            await room.stop()
+            room._emit({"type": "deleted"})
+        return {"deleted": store.delete(room_id) or room is not None}
 
     @app.get("/api/providers/{provider_id}/models")
     async def provider_models(provider_id: str) -> dict:
@@ -294,6 +343,9 @@ def create_app(
 
     @app.websocket("/ws/{room_id}")
     async def room_socket(ws: WebSocket, room_id: str) -> None:
+        if not valid_room_id(room_id):
+            await ws.close(code=1008, reason="invalid room id")
+            return
         await ws.accept()
         room = get_room(room_id)
         queue = room.subscribe()
@@ -303,42 +355,70 @@ def create_app(
             while True:
                 await ws.send_json(await queue.get())
 
+        def reply_error(text: str) -> None:
+            # Only the sender needs to hear about their own invalid input.
+            queue.put_nowait({"type": "agent_error", "text": text})
+
         pump_task = asyncio.create_task(pump())
         try:
             while True:
-                data = await ws.receive_json()
+                try:
+                    data = await ws.receive_json()
+                except (ValueError, KeyError):
+                    reply_error("That message wasn't valid JSON.")
+                    continue
+                if not isinstance(data, dict):
+                    reply_error("Messages must be JSON objects.")
+                    continue
                 kind = data.get("type")
                 try:
-                    if kind == "say" and str(data.get("text", "")).strip():
-                        await room.post_human(str(data["text"]).strip())
-                    elif kind == "stop":
-                        await room.stop()
-                    elif kind == "add_agent" and isinstance(data.get("agent"), dict):
-                        room.add_agent(data["agent"])
-                    elif kind == "remove_agent":
-                        room.remove_agent(str(data.get("name", "")))
-                    elif kind == "set_whiteboard":
-                        room.set_whiteboard(str(data.get("text", "")), by=HUMAN)
-                    elif kind == "save_team":
-                        name = str(data.get("name", ""))
-                        team_store.save(name, room.agents)
-                        queue.put_nowait({"type": "teams", "teams": team_store.list(), "saved": name.strip()})
-                    elif kind == "load_team":
-                        name = str(data.get("name", ""))
-                        room.load_roster(team_store.load(name), label=name.strip())
-                    elif kind == "delete_team":
-                        team_store.delete(str(data.get("name", "")))
-                        queue.put_nowait({"type": "teams", "teams": team_store.list()})
+                    await handle(room, kind, data, queue)
                 except (AgentError, TeamError) as e:
-                    # Only the sender needs to hear about their own invalid input.
-                    queue.put_nowait({"type": "agent_error", "text": str(e)})
-        except WebSocketDisconnect:
+                    reply_error(str(e))
+        except (WebSocketDisconnect, RuntimeError):
             pass
         finally:
             room.unsubscribe(queue)
             pump_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await pump_task
+
+    async def handle(room: Room, kind, data: dict, queue: asyncio.Queue) -> None:
+        name = str(data.get("name", ""))
+        if kind == "say":
+            text = str(data.get("text", "")).strip()
+            if len(text) > MAX_HUMAN_MESSAGE:
+                raise AgentError(f"That message is too long (max {MAX_HUMAN_MESSAGE:,} characters).")
+            if text:
+                await room.post_human(text)
+        elif kind == "stop":
+            await room.stop()
+        elif kind == "continue":
+            await room.continue_conversation()
+        elif kind == "clear":
+            await room.clear()
+        elif kind == "add_agent" and isinstance(data.get("agent"), dict):
+            room.add_agent(data["agent"])
+        elif kind == "update_agent" and isinstance(data.get("agent"), dict):
+            room.update_agent(name, data["agent"])
+        elif kind == "remove_agent":
+            room.remove_agent(name)
+        elif kind == "set_muted":
+            room.set_muted(name, bool(data.get("muted", True)))
+        elif kind == "set_max_turns":
+            room.set_max_turns(data.get("value"))
+        elif kind == "set_whiteboard":
+            room.set_whiteboard(str(data.get("text", "")), by=HUMAN)
+        elif kind == "save_team":
+            team_store.save(name, room.agents)
+            queue.put_nowait({"type": "teams", "teams": team_store.list(), "saved": name.strip()})
+        elif kind == "load_team":
+            room.load_roster(team_store.load(name), label=name.strip())
+        elif kind == "delete_team":
+            team_store.delete(name)
+            queue.put_nowait({"type": "teams", "teams": team_store.list()})
+        else:
+            raise AgentError(f"Unknown request {kind!r}.")
 
     return app
 

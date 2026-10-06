@@ -219,8 +219,8 @@ def test_room_waits_out_rate_limits_instead_of_going_quiet():
         room = Room("r", [A, B], backend, RoomSettings(max_agent_turns=1, throttle_waits=(0.01, 0.01)))
         orig = room.collect_bids
 
-        async def counting(muted=frozenset()):
-            result = await orig(muted)
+        async def counting(muted=frozenset(), **kw):
+            result = await orig(muted, **kw)
             rounds["n"] += 1
             return result
 

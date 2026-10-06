@@ -66,8 +66,10 @@ class AgentError(ValueError):
     pass
 
 
-def agent_from_dict(data: dict, existing: list[Agent]) -> Agent:
-    """Validate an agent definition coming from the UI."""
+def agent_from_dict(data: dict, existing: list[Agent], require_ready: bool = True) -> Agent:
+    """Validate an agent definition coming from the UI (or a saved room/team file).
+    `require_ready=False` keeps agents whose provider isn't set up on this machine, so
+    restoring a saved room never silently drops teammates; they'll show an error when asked."""
     name = str(data.get("name", "")).strip()
     if not NAME_RE.match(name):
         raise AgentError("Name must start with a letter and be 1-20 letters, digits, - or _.")
@@ -77,7 +79,7 @@ def agent_from_dict(data: dict, existing: list[Agent]) -> Agent:
     if provider not in PROVIDERS:
         raise AgentError(f"Unknown provider {provider!r}.")
     spec = PROVIDERS[provider]
-    if not spec.configured:
+    if require_ready and not spec.configured:
         if provider == "anthropic":
             raise AgentError('Claude support is not installed. Run: pip install -e ".[claude]" and restart.')
         missing = spec.base_url_env if provider == "custom" else spec.key_env
@@ -101,15 +103,43 @@ class Message:
     text: str
     id: str = field(default_factory=lambda: uuid.uuid4().hex[:12])
     ts: float = field(default_factory=time.time)
+    meta: dict = field(default_factory=dict)  # e.g. {"model": ..., "secs": 3.2} for agent replies
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "author": self.author, "text": self.text, "ts": self.ts}
+        d = {"id": self.id, "author": self.author, "text": self.text, "ts": self.ts}
+        if self.meta:
+            d["meta"] = self.meta
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Message":
+        return cls(
+            author=str(d["author"]),
+            text=str(d.get("text", "")),
+            id=str(d.get("id") or uuid.uuid4().hex[:12]),
+            ts=float(d.get("ts") or time.time()),
+            meta=dict(d.get("meta") or {}),
+        )
 
 
-def render_transcript(messages: list[Message]) -> str:
+# Long rooms would overflow small free models' context windows, so agents see the most
+# recent messages in full and are told how many earlier ones were left out. The whiteboard
+# (sent separately) carries the team's durable state across that cut.
+TRANSCRIPT_WINDOW = 40
+MAX_MESSAGE_CHARS = 4000
+
+
+def render_transcript(messages: list[Message], window: int = TRANSCRIPT_WINDOW) -> str:
     if not messages:
         return "(The room is empty. No one has spoken yet.)"
-    return "\n\n".join(f"[{m.author}]: {m.text}" for m in messages)
+    shown = messages[-window:]
+    parts = []
+    if len(messages) > len(shown):
+        parts.append(f"(… {len(messages) - len(shown)} earlier messages not shown; the whiteboard has the key decisions …)")
+    for m in shown:
+        text = m.text if len(m.text) <= MAX_MESSAGE_CHARS else m.text[:MAX_MESSAGE_CHARS] + " …(truncated)"
+        parts.append(f"[{m.author}]: {text}")
+    return "\n\n".join(parts)
 
 
 DEFAULT_ROSTER: list[Agent] = [
