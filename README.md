@@ -1,12 +1,19 @@
 # agent-collab
 
+[![CI](https://github.com/Toblaron/agent-collab/actions/workflows/ci.yml/badge.svg)](https://github.com/Toblaron/agent-collab/actions/workflows/ci.yml)
+
 A chat room where AI agents collaborate the way people do in a good working session: they
 jump in when they have something to add, hand work to each other with `@mentions`, push back,
 and go quiet when the job's done. You're in the room too, and your message interrupts whoever
 is talking.
 
 Agents don't have to run on the same model. Put Claude, a local Llama on Ollama, Gemini and a
-free OpenRouter model in one room and let them work it out together.
+free OpenRouter model in one room and let them work it out together. They share a whiteboard,
+can search the web, and you can save a good team and bring it back later.
+
+The UI is a terminal: Matrix-green on black with digital rain and CRT scanlines by default,
+`[theme]` for a light variant, `[rain]` to switch the animation off (it's off automatically if
+your OS asks for reduced motion).
 
 ## How "natural" turn-taking works
 
@@ -83,6 +90,48 @@ How non-Claude agents work:
 - **No arbitrary URLs from the browser.** Provider base URLs come only from the built-in table or
   env vars, so the UI can't be used to make the server call arbitrary hosts.
 
+## Tools: shared whiteboard & web search
+
+Tools work for **every** model, including small local ones with no function-calling support,
+because they're plain-text markers the room parses after an agent finishes speaking:
+
+````
+```whiteboard
+# Launch plan
+- [ ] Bo: landing page
+```
+
+[[search: competitor pricing for team chat apps]]
+````
+
+- **Whiteboard (BOARD tab):** one shared document per room, shown to every agent on every turn.
+  A whiteboard block replaces the whole document (agents are told to write the full updated
+  version). You can edit it too: `[edit]`. In the chat the block collapses to
+  `[updated the whiteboard]`.
+- **Web search:** up to 2 queries per message. Results are posted to the room as a `search`
+  message, so the whole team sees them and anyone (usually the asker) can pick them up on the
+  next turn. Results are labelled untrusted web content in every agent's prompt.
+- Tools are per agent: tick/untick them in the **+ agent** dialog. Markers from an agent
+  without that tool are left as plain text.
+
+| Search backend | Cost | Enable |
+|---|---|---|
+| DuckDuckGo | Free, no key (best-effort HTML scrape; can be rate-limited) | default when nothing else is set |
+| Tavily | Free tier | `TAVILY_API_KEY` |
+| Brave Search | Free tier | `BRAVE_API_KEY` |
+| SearXNG | Free, self-hosted (enable JSON output) | `SEARXNG_URL` |
+
+`AGENT_COLLAB_SEARCH=auto` (default) picks the first configured of Tavily → Brave → SearXNG →
+DuckDuckGo. Force one with `AGENT_COLLAB_SEARCH=brave` etc., or `off`.
+
+## Saved teams
+
+TEAMS tab → name it → `[save]` stores the room's current roster (names, roles, personas,
+providers, models, tools) as JSON in `~/.agent-collab/teams/` (`AGENT_COLLAB_DATA_DIR` to move
+it). `[load]` swaps a saved team into any room; agents whose provider isn't configured on the
+current server are skipped with a note, so a team file is safe to share between machines. Team
+files are plain JSON: commit them, hand-edit them, share them.
+
 ## Configuration
 
 | Env var | Default | Notes |
@@ -92,7 +141,9 @@ How non-Claude agents work:
 | `AGENT_COLLAB_DEFAULT_MODEL` | provider default | Model for the starter team |
 | `AGENT_COLLAB_BID_EFFORT` | `low` | Claude only. Bids are cheap yes/no-ish calls |
 | `AGENT_COLLAB_SPEAK_EFFORT` | `medium` | Claude only. Raise to `high` for harder tasks |
-| `AGENT_COLLAB_MOCK` | unset | `1` = offline mock backend |
+| `AGENT_COLLAB_SEARCH` | `auto` | `auto`, `off`, `tavily`, `brave`, `searxng`, `duckduckgo` |
+| `AGENT_COLLAB_DATA_DIR` | `~/.agent-collab` | Where saved teams live |
+| `AGENT_COLLAB_MOCK` | unset | `1` = offline mock LLMs + mock search (UI work, demos) |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | |
 
 Claude requests use prompt caching (stable system prompt per agent), structured outputs for bids
@@ -106,19 +157,24 @@ Roadmap).
 
 ```
 agent_collab/
-  agents.py    Agent personas (+ provider/model), validation, default roster (Ada/Bo/Cy/Dee)
+  agents.py    Agent personas (+ provider/model/tools), validation, default roster (Ada/Bo/Cy/Dee)
+  actions.py   Text-marker tool protocol: whiteboard blocks, [[search: …]]
+  search.py    Search backends (Tavily, Brave, SearXNG, DuckDuckGo, mock)
+  teams.py     Saved-team store (JSON files)
   providers.py Provider table (Claude, Ollama, Groq, Gemini, OpenRouter, HF, Mistral, custom)
   llm.py       ClaudeBackend, OpenAICompatBackend, RoutingBackend, MockBackend
-  room.py      Room: bidding, scoring, speaking, interruption, pub/sub
-  server.py    FastAPI app — GET /, /healthz, /api/providers[/{id}/models], WS /ws/{room}
-  static/      Single-file UI (no build step)
-tests/         Turn-taking + WebSocket tests (no API calls)
+  room.py      Room: bidding, speaking, tools, whiteboard, interruption, pub/sub
+  server.py    FastAPI app: GET /, /healthz, /api/{config,teams,providers[/{id}/models]}, WS /ws/{room}
+  static/      Single-file terminal UI (no build step)
+tests/         Turn-taking, providers, tools, search parsers, teams, WebSocket (no network)
+.github/       CI: pytest on Python 3.10–3.13
 ```
 
 WebSocket protocol — client sends `say`, `stop`, `add_agent` (`{"agent": {name, role, provider,
-model, persona, color}}`) and `remove_agent` (`{"name"}`); server emits `history`, `roster`,
-`message`, `status`, `bids`, `stream_start`, `stream_delta`, `stream_end`, `notice`, `error`
-(an agent's provider failed) and `agent_error` (invalid add/remove, sent only to the requester).
+model, persona, color, tools}}`), `remove_agent`, `set_whiteboard` (`{"text"}`), `save_team`,
+`load_team`, `delete_team` (`{"name"}`); server emits `history`, `roster`, `message`, `status`,
+`bids`, `stream_start`, `stream_delta`, `stream_end`, `whiteboard`, `teams`, `notice`, `error`
+(an agent's provider failed) and `agent_error` (invalid request, sent only to the requester).
 
 ## Customising the team
 
@@ -128,9 +184,8 @@ Add agents from the UI, or edit `DEFAULT_ROSTER` in `agents.py` (each `Agent` ta
 ## Roadmap
 
 - Separate bid model per agent (e.g. bid on a small local model, speak on a big one)
-- Save/load named rosters
-- Tools per agent (web search, code execution, a shared scratchpad/whiteboard)
-- Persistence (SQLite) and room/roster creation from the UI
+- More tools: sandboxed code execution, fetch-a-URL
+- Persist rooms and transcripts (SQLite) across server restarts
 - Private side-channels (agent ↔ agent DMs) and a task board agents can claim items from
 - Long-room context management (compaction / rolling summary)
 
