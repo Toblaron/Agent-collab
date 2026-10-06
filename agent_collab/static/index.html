@@ -16,6 +16,7 @@
     --err: #ff6b6b; --warn: #ffd166; --search: #5ce1ff; --human: #e8ffe9; --code-bg: rgba(0, 255, 65, .06);
     --glow: 0 0 6px rgba(0, 255, 65, .55); --soft-glow: 0 0 4px rgba(0, 255, 65, .25);
     --sb-track: #031a0b; --sb-thumb: #1f7a3a; --sb-thumb-hover: #00ff41;
+    --rail-bg: rgba(0, 255, 65, .07); --rail-border: #145c2a; --rail-thumb: #22b14c; --rail-grip: #003b12;
     color-scheme: dark;
   }
   :root[data-theme="light"] {
@@ -24,6 +25,7 @@
     --err: #b91c1c; --warn: #9a6700; --search: #0369a1; --human: #111; --code-bg: #eef3ef;
     --glow: none; --soft-glow: none;
     --sb-track: #eef1ee; --sb-thumb: #a9b8ad; --sb-thumb-hover: #0a7a2a;
+    --rail-bg: #edf2ee; --rail-border: #cfd8d1; --rail-thumb: #7f9a86; --rail-grip: #edf2ee;
     color-scheme: light;
   }
   * { box-sizing: border-box; }
@@ -38,13 +40,20 @@
   ::-webkit-scrollbar-track { background: var(--sb-track); }
   ::-webkit-scrollbar-thumb { background: var(--sb-thumb); border: 2px solid var(--sb-track); border-radius: 0; min-height: 40px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--sb-thumb-hover); }
-  .scroll { overflow-y: scroll; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
-  /* Android Chrome only draws fading overlay scrollbars and ignores the styling above, so where the
-     native bar has no width we draw our own: a rail with a draggable thumb. */
-  .rail { position: absolute; top: 0; right: 0; width: 12px; z-index: 4; touch-action: none; }
-  .rail::before { content: ""; position: absolute; top: 0; bottom: 0; right: 3px; width: 4px; background: var(--sb-track); }
-  .rail .thumb { position: absolute; right: 1px; width: 8px; min-height: 28px; background: var(--sb-thumb); }
-  .rail.drag .thumb, .rail .thumb:hover { background: var(--sb-thumb-hover); }
+  /* Chat windows (.scroll) always get our own scroll bar: browsers disagree on native ones, and
+     Android Chrome only shows a faint overlay that fades away. Native bars are hidden there. */
+  .scroll { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+            scrollbar-width: none; padding-right: calc(var(--rail-w) + 6px) !important; }
+  .scroll::-webkit-scrollbar { display: none; width: 0; }
+  :root { --rail-w: 14px; }
+  .rail { position: absolute; width: var(--rail-w); z-index: 4; touch-action: none; cursor: pointer;
+          background: var(--rail-bg); border-left: 1px solid var(--rail-border); }
+  .rail .thumb { position: absolute; left: 2px; right: 2px; min-height: 36px; background: var(--rail-thumb);
+                 box-shadow: var(--soft-glow); transition: background .15s; }
+  .rail .thumb::after { content: ""; position: absolute; left: 3px; right: 3px; top: 50%; height: 7px; margin-top: -3px;
+                        background: repeating-linear-gradient(to bottom, var(--rail-grip) 0 1px, transparent 1px 3px); }
+  .rail.full .thumb { opacity: .35; }                  /* nothing to scroll yet: thumb fills the bar */
+  .rail.drag .thumb, .rail:hover .thumb { background: var(--sb-thumb-hover); }
 
   #rain { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; opacity: .12; pointer-events: none; }
   :root[data-theme="light"] #rain { display: none; }
@@ -113,7 +122,7 @@
   .md pre code { background: none; padding: 0; white-space: pre; }
   .md blockquote { margin: .3em 0; padding-left: 10px; border-left: 2px solid var(--dim); color: var(--muted); }
   .md hr { border: 0; border-top: 1px dashed var(--border); }
-  .md table { border-collapse: collapse; margin: .4em 0; font-size: 12.5px; }
+  .md table { border-collapse: collapse; margin: .4em 0; font-size: 12.5px; display: block; max-width: 100%; overflow-x: auto; }
   .md td, .md th { border: 1px solid var(--border); padding: 2px 8px; }
   .sys { color: var(--dim); font-size: 12px; margin: 0 0 12px; }
   .sys.err { color: var(--err); }
@@ -189,7 +198,8 @@
            width: min(480px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); box-shadow: 0 0 24px rgba(0,255,65,.15); }
   dialog::backdrop { background: rgba(0, 0, 0, .7); }
   dialog .titlebar { padding: 8px 14px; border-bottom: 1px solid var(--border); color: var(--bright); text-shadow: var(--glow); font-size: 13px; }
-  dialog form { padding: 4px 16px 16px; }
+  dialog[open] { display: flex; flex-direction: column; }
+  dialog form { padding: 4px 16px 16px; max-height: calc(100dvh - 80px); min-height: 0; }
   dialog label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
   dialog .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
   dialog .pnote { font-size: 11.5px; color: var(--dim); margin-top: 4px; min-height: 1em; }
@@ -220,7 +230,7 @@
     #log { padding: 12px 10px 20px; }
     form.chat { padding-left: 10px; padding-right: 10px; }
     #jump { right: 14px; }
-    ::-webkit-scrollbar { width: 8px; }
+    :root { --rail-w: 16px; }   /* bigger target for thumbs */
   }
   @media (prefers-reduced-motion: reduce) {
     header h1::before, .status.busy b::after, .line.streaming .body::after { animation: none; }
@@ -311,7 +321,7 @@
 
 <dialog id="agentDialog">
   <div class="titlebar" id="dialogTitle">&gt; spawn_agent</div>
-  <form id="agentForm" method="dialog">
+  <form id="agentForm" method="dialog" class="scroll">
     <div class="grid">
       <div><label for="fName">name</label><input id="fName" required maxlength="20" placeholder="Eli" autocomplete="off"></div>
       <div><label for="fRole">role</label><input id="fRole" maxlength="40" placeholder="designer" autocomplete="off"></div>
@@ -508,41 +518,52 @@ const rain = (() => {
 })();
 $("rainBtn").onclick = () => rain.toggle();
 
-// ---------- custom scroll rails (only where native scrollbars are invisible) ----------
-function attachRail(container, getScroller) {
-  const rail = document.createElement("div"); rail.className = "rail"; rail.hidden = true;
+// ---------- scroll bars for every chat window ----------
+let refreshRails = () => {};  // replaced once every rail exists (tabs call it during startup)
+// Each .scroll element gets a rail drawn in its (positioned) container: always visible, draggable,
+// tap-to-jump, and kept in sync while content streams in or the layout changes.
+function attachRail(container, el) {
+  const rail = document.createElement("div"); rail.className = "rail"; rail.setAttribute("aria-hidden", "true");
   const thumb = document.createElement("div"); thumb.className = "thumb"; rail.append(thumb);
   container.append(rail);
-  let el = null;
+  let queued = false;
   function update() {
-    el = getScroller();
-    if (!el || !el.offsetParent) { rail.hidden = true; return; }
-    const nativeWidth = el.offsetWidth - el.clientWidth;      // 0 = overlay scrollbars (phones)
-    const scrollable = el.scrollHeight > el.clientHeight + 2;
-    rail.hidden = nativeWidth > 0 || !scrollable;
-    if (rail.hidden) return;
+    queued = false;
+    const visible = el.offsetParent !== null && el.clientHeight > 0;
+    rail.hidden = !visible;
+    if (!visible) return;
     const box = el.getBoundingClientRect(), parent = container.getBoundingClientRect();
     rail.style.top = box.top - parent.top + "px";
+    rail.style.left = box.right - parent.left - rail.offsetWidth + "px";
     rail.style.height = el.clientHeight + "px";
-    const h = Math.max(28, el.clientHeight * el.clientHeight / el.scrollHeight);
+    const max = el.scrollHeight - el.clientHeight;
+    rail.classList.toggle("full", max <= 1);
+    const h = max <= 1 ? el.clientHeight : Math.max(36, el.clientHeight * el.clientHeight / el.scrollHeight);
     thumb.style.height = h + "px";
-    thumb.style.top = (el.scrollTop / (el.scrollHeight - el.clientHeight)) * (el.clientHeight - h) + "px";
+    thumb.style.top = (max <= 1 ? 0 : (el.scrollTop / max) * (el.clientHeight - h)) + "px";
   }
-  let dragging = false;
+  const schedule = () => { if (!queued) { queued = true; requestAnimationFrame(update); } };
+  let grab = null;  // where on the thumb the drag started, so the thumb doesn't jump under the finger
   const seek = (clientY) => {
     const r = rail.getBoundingClientRect(), h = thumb.offsetHeight;
-    const frac = Math.min(1, Math.max(0, (clientY - r.top - h / 2) / (r.height - h)));
+    const frac = Math.min(1, Math.max(0, (clientY - r.top - grab) / (r.height - h)));
     el.scrollTop = frac * (el.scrollHeight - el.clientHeight);
   };
-  rail.addEventListener("pointerdown", (e) => { dragging = true; rail.classList.add("drag"); rail.setPointerCapture(e.pointerId); seek(e.clientY); e.preventDefault(); });
-  rail.addEventListener("pointermove", (e) => { if (dragging) seek(e.clientY); });
-  const end = () => { dragging = false; rail.classList.remove("drag"); };
+  rail.addEventListener("pointerdown", (e) => {
+    const t = thumb.getBoundingClientRect();
+    grab = e.clientY >= t.top && e.clientY <= t.bottom ? e.clientY - t.top : thumb.offsetHeight / 2;
+    rail.classList.add("drag"); rail.setPointerCapture(e.pointerId); seek(e.clientY); e.preventDefault();
+  });
+  rail.addEventListener("pointermove", (e) => { if (grab !== null) seek(e.clientY); });
+  const end = () => { grab = null; rail.classList.remove("drag"); };
   rail.addEventListener("pointerup", end); rail.addEventListener("pointercancel", end);
-  document.addEventListener("scroll", update, { capture: true, passive: true });
-  addEventListener("resize", update);
-  new ResizeObserver(update).observe(container);
-  new MutationObserver(() => requestAnimationFrame(update)).observe(container, { childList: true, subtree: true, characterData: true });
-  return update;
+  el.addEventListener("scroll", schedule, { passive: true });
+  addEventListener("resize", schedule);
+  new ResizeObserver(schedule).observe(el);
+  new ResizeObserver(schedule).observe(container);
+  new MutationObserver(schedule).observe(el, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["class", "hidden", "style"] });
+  schedule();
+  return schedule;
 }
 
 // ---------- log & scrolling ----------
@@ -710,6 +731,7 @@ function showTab(name) {
   if (name === "teams") refreshTeams();
   if (name === "rooms") refreshRooms();
   if (name === "chat") requestAnimationFrame(updateJump);
+  refreshRails();
 }
 let currentSideTab = "agents";
 for (const t of document.querySelectorAll(".tabs button")) t.onclick = () => showTab(t.dataset.tab);
@@ -1088,6 +1110,7 @@ async function openAgentDialog(agent) {
   if (!config.search) search.checked = false;
   search.parentElement.title = config.search ? "" : "Search is turned off on this server (AGENT_COLLAB_SEARCH)";
   dlg.showModal();
+  refreshRails();
   $("fName").focus();
 }
 $("addBtn").onclick = () => openAgentDialog(null);
@@ -1111,9 +1134,12 @@ $("agentForm").onsubmit = (e) => {
 };
 
 const railUpdates = [
-  attachRail(document.querySelector("main"), () => log),
-  attachRail(document.querySelector("aside"), () => document.querySelector(".pane.on")),
+  attachRail(document.querySelector("main"), log),
+  ...[...document.querySelectorAll("aside .pane")].map(p => attachRail(document.querySelector("aside"), p)),
+  attachRail($("agentDialog"), $("agentForm")),
 ];
+refreshRails = () => railUpdates.forEach(f => f());
+refreshRails();
 
 // ---------- boot ----------
 (async () => {
