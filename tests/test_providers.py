@@ -84,7 +84,9 @@ def test_compat_backend_bids_and_streams(monkeypatch):
 def test_compat_backend_bid_errors_become_silence(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "k")
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(429, json={})))
-    bid = run(OpenAICompatBackend(client).bid(GROQ_AGENT, [GROQ_AGENT], []))
+    backend = OpenAICompatBackend(client)
+    backend.RETRY_DELAYS = (0, 0)
+    bid = run(backend.bid(GROQ_AGENT, [GROQ_AGENT], []))
     assert bid.urgency == 0 and "rate limited" in bid.reason
 
 
@@ -242,6 +244,7 @@ def test_check_provider_reports_key_problems(monkeypatch):
     assert not c.ok and "key rejected" in c.note and "GROQ_API_KEY" in c.note
 
     monkeypatch.setattr(server.httpx, "get", lambda *a, **k: httpx.Response(200, json={"data": [{"id": "llama-3.3-70b-versatile"}]}))
+    monkeypatch.setattr(server.httpx, "post", lambda *a, **k: httpx.Response(200, json={"choices": []}))
     assert server.check_provider("groq") == server.ProviderCheck("groq", True, "llama-3.3-70b-versatile", "ok")
 
     monkeypatch.delenv("GROQ_API_KEY")
@@ -295,3 +298,62 @@ def test_keys_env_flags_key_on_wrong_line(tmp_path, monkeypatch):
     f.write_text("GEMINI_API_KEY=gsk_groqkey123456\n")
     _, problems = load_keys(f)
     assert any("looks like a GROQ_API_KEY key" in p for p in problems)
+
+
+def test_check_falls_back_past_retired_and_busy_models(monkeypatch):
+    """The real Gemini situation on 2026-10-06: default retired (404), flash busy (503), lite works."""
+    from agent_collab import server
+
+    monkeypatch.setenv("GEMINI_API_KEY", "AQ.test")
+    listed = ["gemini-2.5-flash", "gemini-embedding-001", "gemini-flash-latest", "gemini-flash-lite-latest"]
+    monkeypatch.setattr(server.httpx, "get", lambda *a, **k: httpx.Response(200, json={"data": [{"id": f"models/{m}"} for m in listed]}))
+    status = {"gemini-flash-latest": 503, "gemini-flash-lite-latest": 200, "gemini-2.5-flash": 404}
+    probed = []
+
+    def post(url, json, **k):
+        probed.append(json["model"])
+        return httpx.Response(status[json["model"]], text="{}")
+
+    monkeypatch.setattr(server.httpx, "post", post)
+    c = server.check_provider("gemini")
+    assert (c.ok, c.model) == (True, "gemini-flash-lite-latest")
+    assert probed == ["gemini-flash-latest", "gemini-flash-lite-latest"]  # default first, embeddings never probed
+
+    status["gemini-flash-lite-latest"] = 503
+    c = server.check_provider("gemini")
+    assert (c.ok, c.model) == (True, "gemini-flash-latest") and "busy" in c.note  # busy beats nothing
+
+    for m in status:
+        status[m] = 404
+    assert not server.check_provider("gemini").ok
+
+
+def test_compat_backend_retries_busy_provider(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    calls = {"n": 0}
+
+    def flaky(request):  # first call of each kind is "busy", then it works
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": {"message": "high demand"}})
+        if json.loads(request.content).get("stream"):
+            return httpx.Response(200, text='data: {"choices": [{"delta": {"content": "hi"}}]}\n\ndata: [DONE]\n\n')
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"urgency": 0.5, "reason": "r"}'}}]})
+
+    def make(handler):
+        b = OpenAICompatBackend(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        b.RETRY_DELAYS = (0, 0)
+        return b
+
+    async def speak(b):
+        return "".join([t async for t in b.speak(GROQ_AGENT, [GROQ_AGENT], [])])
+
+    backend = make(flaky)
+    assert run(backend.bid(GROQ_AGENT, [GROQ_AGENT], [])).urgency == 0.5
+    calls["n"] = 0
+    assert run(speak(backend)) == "hi" and calls["n"] == 2
+
+    busy = make(lambda r: httpx.Response(503, json={"error": {"message": "high demand"}}))
+    assert run(busy.bid(GROQ_AGENT, [GROQ_AGENT], [])).reason == "(provider busy)"
+    with pytest.raises(Exception, match="503: high demand"):
+        run(speak(busy))

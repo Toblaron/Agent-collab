@@ -18,8 +18,8 @@ KNOWN = (
     "AGENT_COLLAB_DEFAULT_PROVIDER", "AGENT_COLLAB_DEFAULT_MODEL", "AGENT_COLLAB_SEARCH",
 )
 # Expected prefixes, used only to warn ("this looks like a Groq key on the Gemini line").
-PREFIXES = {"GROQ_API_KEY": "gsk_", "OPENROUTER_API_KEY": "sk-or-", "HF_TOKEN": "hf_",
-            "ANTHROPIC_API_KEY": "sk-ant-", "GEMINI_API_KEY": "AIza", "TAVILY_API_KEY": "tvly-"}
+PREFIXES = {"GROQ_API_KEY": ("gsk_",), "OPENROUTER_API_KEY": ("sk-or-",), "HF_TOKEN": ("hf_",),
+            "ANTHROPIC_API_KEY": ("sk-ant-",), "GEMINI_API_KEY": ("AIza", "AQ."), "TAVILY_API_KEY": ("tvly-",)}
 INVISIBLE = re.compile(r"[​-‏  ﻿ \r]")
 
 
@@ -56,11 +56,11 @@ def load_keys(path: Path) -> tuple[dict[str, str], list[str]]:
             continue
         if " " in value:
             problems.append(f"line {n}: {name} has a space in the middle; keys never contain spaces")
-        prefix = PREFIXES.get(name)
-        if prefix and not value.startswith(prefix):
+        prefixes = PREFIXES.get(name)
+        if prefixes and not value.startswith(prefixes):
             owner = next((k for k, p in PREFIXES.items() if value.startswith(p)), None)
             hint = f"; it looks like a {owner} key" if owner else ""
-            problems.append(f"line {n}: {name} usually starts with {prefix!r}{hint}")
+            problems.append(f"line {n}: {name} usually starts with {' or '.join(map(repr, prefixes))}{hint}")
         found[name] = value
         if not os.environ.get(name):
             os.environ[name] = value

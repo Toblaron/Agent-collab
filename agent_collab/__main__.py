@@ -26,7 +26,7 @@ def doctor(keys: dict, problems: list) -> None:
         print(f"  {name:<20} {mask(value)}")
     for p in problems:
         print(f"  !! {p}")
-    print("Provider check (lists models; spends no tokens):")
+    print("Provider check (sends a 5-token test message to each provider):")
     for c in server.check_providers():
         mark = "OK " if c.ok else ("-- " if c.note.startswith(("no ", "not running", "not installed")) else "!! ")
         print(f"  {mark}{PROVIDERS[c.id].label:<28} {c.model + '  ' if c.ok else ''}{c.note}")

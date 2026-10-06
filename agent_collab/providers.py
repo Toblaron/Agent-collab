@@ -73,7 +73,7 @@ PROVIDERS: dict[str, ProviderSpec] = {
         ),
         ProviderSpec(
             "gemini", "Google Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY",
-            "gemini-2.5-flash", "Free tier with rate limits. Key: aistudio.google.com",
+            "gemini-flash-latest", "Free tier with rate limits. Key: aistudio.google.com",
         ),
         ProviderSpec(
             "openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "OPENROUTER_API_KEY",

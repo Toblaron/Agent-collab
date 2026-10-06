@@ -37,7 +37,7 @@ AUTO_ORDER = ("gemini", "groq", "openrouter", "mistral", "huggingface", "anthrop
 # When a provider's default model has disappeared from its live list (free catalogues churn),
 # pick a replacement whose id contains one of these hints, skipping non-chat models.
 MODEL_HINTS = {
-    "gemini": ("flash", "pro"),
+    "gemini": ("flash-latest", "flash-lite-latest", "flash", "pro"),
     "groq": ("llama-3.3", "llama", "qwen", "gemma"),
     "openrouter": (":free",),
     "mistral": ("small", "medium", "large"),
@@ -67,9 +67,37 @@ def pick_model(pid: str, default: str, ids: list[str]) -> str:
     return chat[0]
 
 
+def candidate_models(pid: str, default: str, ids: list[str]) -> list[str]:
+    """Models worth trying, best first: the default, then listed chat models matching the hints."""
+    chat = [i for i in ids if not any(bad in i.lower() for bad in NOT_CHAT)]
+    out = [default] if (not ids or default in ids) else []
+    for hint in MODEL_HINTS.get(pid, ("",)):
+        out += [i for i in chat if hint in i.lower() and i not in out]
+    return out or chat[:1] or [default]
+
+
+def probe_chat(spec, model: str) -> tuple[int, str]:
+    """One tiny real request: the only way to know a model will actually answer
+    (listed models can be retired for new accounts, or overloaded right now)."""
+    try:
+        r = httpx.post(
+            f"{spec.url}/chat/completions",
+            headers=auth_headers(spec),
+            json={"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "max_tokens": 5},
+            timeout=30.0,
+        )
+    except httpx.HTTPError:
+        return 0, "unreachable"
+    return r.status_code, r.text
+
+
+MAX_PROBES = 4
+
+
 def check_provider(pid: str) -> ProviderCheck:
-    """Is this provider usable right now? Lists its models, which proves the key works
-    (or that Ollama is running) without spending any tokens."""
+    """Is this provider usable right now? Lists its models (proves the key), then sends a
+    5-token request to the best candidate, falling back through listed models when one is
+    retired or overloaded. Costs a handful of tokens on free tiers."""
     spec = PROVIDERS[pid]
     if pid == "anthropic":
         if not spec.configured:
@@ -91,11 +119,27 @@ def check_provider(pid: str) -> ProviderCheck:
         ids = sorted(m["id"].removeprefix("models/") for m in r.json().get("data", []) if isinstance(m, dict) and "id" in m)
     except ValueError:
         ids = []
-    if pid == "ollama" and not ids:
-        return ProviderCheck(pid, False, None, "running, but no models pulled (ollama pull llama3.2:1b)")
-    model = pick_model(pid, spec.default_model, ids)
-    note = "ok" if model == spec.default_model else f"ok (default model unavailable, using {model})"
-    return ProviderCheck(pid, True, model, note)
+    if pid == "ollama":  # local: listing is proof enough, and a cold model load can take a minute
+        if not ids:
+            return ProviderCheck(pid, False, None, "running, but no models pulled (ollama pull llama3.2:1b)")
+        model = pick_model(pid, spec.default_model, ids)
+        return ProviderCheck(pid, True, model, "ok")
+
+    busy: str | None = None
+    tried = []
+    for model in candidate_models(pid, spec.default_model, ids)[:MAX_PROBES]:
+        status, body = probe_chat(spec, model)
+        if status == 200:
+            note = "ok" if model == spec.default_model else f"ok (using {model}; {', '.join(tried)} unavailable)"
+            return ProviderCheck(pid, True, model, note)
+        if status in (401, 403):
+            return ProviderCheck(pid, False, None, f"key rejected (HTTP {status}): check {spec.key_env} in keys.env")
+        if status in (429, 503) and busy is None:
+            busy = model  # works, just busy/limited right now; keep looking for one that answers
+        tried.append(model)
+    if busy:
+        return ProviderCheck(pid, True, busy, "ok, but busy/rate-limited right now (agents will retry)")
+    return ProviderCheck(pid, False, None, f"no model answered (tried {', '.join(tried)})")
 
 
 _checks: list[ProviderCheck] | None = None

@@ -408,9 +408,9 @@ function renderAgents(list) {
 }
 
 function setStatus(state) {
-  $("status").className = "status" + (["running", "bidding", "searching"].includes(state) ? " busy" : "");
+  $("status").className = "status" + (["running", "bidding", "searching", "waiting"].includes(state) ? " busy" : "");
   $("statusText").textContent =
-    { running: "running", bidding: "agents bidding", searching: "searching the web", idle: "idle" }[state] || state;
+    { running: "running", bidding: "agents bidding", searching: "searching the web", waiting: "waiting out rate limits", idle: "idle" }[state] || state;
 }
 
 // ---------- tabs ----------

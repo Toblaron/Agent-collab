@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
+import re
 from dataclasses import dataclass
 
 from .actions import MAX_WHITEBOARD_CHARS, Actions, extract_actions
@@ -30,6 +31,8 @@ class RoomSettings:
     max_agent_turns: int = 12  # per human message; hard stop against runaway loops
     recent_window: int = 4  # how many recent messages count toward dominance penalty
     dominance_penalty: float = 0.12  # per recent message by the same agent
+    bid_timeout: float = 15.0  # seconds; a slow provider sits the round out instead of stalling everyone
+    throttle_waits: tuple[float, ...] = (15.0, 30.0)  # when *every* bid failed (rate limits), wait and retry
 
 
 @dataclass
@@ -45,6 +48,13 @@ class ScoredBid:
             "score": round(self.score, 2),
             "reason": self.bid.reason,
         }
+
+
+FAILED_BID_MARKERS = ("(rate limited)", "(provider busy)", "(error", "(too slow", "(Claude not installed)")
+
+
+def _failed(bid: Bid) -> bool:
+    return bid.urgency == 0 and bid.reason.startswith(FAILED_BID_MARKERS)
 
 
 class Room:
@@ -177,7 +187,20 @@ class Room:
         bidders = [a for a in self.agents if a.name != last_author and a.name not in muted]
         transcript = list(self.messages)
         board = self.whiteboard
-        bids = await asyncio.gather(*(self.backend.bid(a, self.agents, transcript, board) for a in bidders))
+        last_text = self.messages[-1].text if self.messages else ""
+
+        async def bid_with_deadline(agent: Agent) -> Bid:
+            try:
+                return await asyncio.wait_for(
+                    self.backend.bid(agent, self.agents, transcript, board), self.settings.bid_timeout
+                )
+            except asyncio.TimeoutError:
+                # A handoff ("@Bo, take a look") must not be lost just because Bo's provider is slow.
+                if re.search(rf"@{re.escape(agent.name)}\b", last_text, re.IGNORECASE):
+                    return Bid(urgency=0.9, reason="(mentioned; bid timed out)")
+                return Bid(urgency=0.0, reason="(too slow this round)")
+
+        bids = await asyncio.gather(*(bid_with_deadline(a) for a in bidders))
         scored = [ScoredBid(a, b, self._score(a, b)) for a, b in zip(bidders, bids)]
         return sorted(scored, key=lambda s: s.score, reverse=True)
 
@@ -186,8 +209,22 @@ class Room:
         muted: set[str] = set()  # agents whose provider failed this round
         try:
             for _ in range(self.settings.max_agent_turns):
-                self._emit({"type": "status", "state": "bidding"})
-                bids = await self.collect_bids(muted)
+                mentioned = self._mentioned_agent(muted)
+                if mentioned is not None:
+                    # A direct handoff: the named agent answers, no vote needed (and no N bid requests
+                    # burned on free-tier rate limits).
+                    bids = [ScoredBid(mentioned, Bid(urgency=1.0, reason="was @mentioned"), 1.0)]
+                else:
+                    self._emit({"type": "status", "state": "bidding"})
+                    bids = await self.collect_bids(muted)
+                    for wait in self.settings.throttle_waits:
+                        if not bids or not all(_failed(b.bid) for b in bids):
+                            break
+                        self._emit({"type": "notice", "text": f"every agent's provider is rate-limited or busy; retrying in {wait:.0f}s"})
+                        self._emit({"type": "status", "state": "waiting"})
+                        await asyncio.sleep(wait)
+                        self._emit({"type": "status", "state": "bidding"})
+                        bids = await self.collect_bids(muted)
                 winner = bids[0] if bids and bids[0].score >= self.settings.speak_threshold else None
                 self._emit(
                     {
@@ -207,6 +244,20 @@ class Room:
                 await self._apply(winner.agent, actions)
         finally:
             self._emit({"type": "status", "state": "idle"})
+
+    def _mentioned_agent(self, muted: set[str]) -> Agent | None:
+        """First agent @mentioned in the latest message (not its author, not muted)."""
+        if not self.messages:
+            return None
+        last = self.messages[-1]
+        hits = []
+        for agent in self.agents:
+            if agent.name == last.author or agent.name in muted:
+                continue
+            match = re.search(rf"@{re.escape(agent.name)}\b", last.text, re.IGNORECASE)
+            if match:
+                hits.append((match.start(), agent))
+        return min(hits, key=lambda h: h[0])[1] if hits else None
 
     async def _speak(self, agent: Agent) -> Actions:
         message = Message(author=agent.name, text="")

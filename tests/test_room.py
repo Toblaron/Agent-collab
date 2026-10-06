@@ -128,3 +128,109 @@ def test_websocket_end_to_end():
 def test_http_routes(path):
     with TestClient(create_app(MockBackend(delay=0))) as client:
         assert client.get(path).status_code == 200
+
+
+class SlowBidder:
+    """Bo's provider takes forever to bid; everyone else answers instantly."""
+
+    def __init__(self, ada_urgency):
+        self.ada_urgency = ada_urgency
+        self.spoke = []
+
+    async def bid(self, agent, roster, transcript, whiteboard=""):
+        if agent.name == "Bo":
+            await asyncio.sleep(10)
+        return Bid(urgency=self.ada_urgency if agent.name == "A" else 0.0, reason="")
+
+    async def speak(self, agent, roster, transcript, whiteboard=""):
+        self.spoke.append(agent.name)
+        yield "ok"
+
+
+def test_slow_bidder_does_not_stall_the_room():
+    async def go():
+        backend = SlowBidder(ada_urgency=0.9)
+        room = Room("r", [A, Agent("Bo", "b", "")], backend, RoomSettings(max_agent_turns=1, bid_timeout=0.05))
+        start = asyncio.get_event_loop().time()
+        await room.post_human("hi")
+        await room.wait_idle()
+        return backend, asyncio.get_event_loop().time() - start
+
+    backend, elapsed = run(go())
+    assert backend.spoke == ["A"] and elapsed < 1
+
+
+def test_mentioned_agent_keeps_the_floor_even_if_its_bid_times_out():
+    async def go():
+        backend = SlowBidder(ada_urgency=0.0)
+        room = Room("r", [A, Agent("Bo", "b", "")], backend, RoomSettings(max_agent_turns=1, bid_timeout=0.05))
+        await room.post_human("@Bo can you take this?")
+        await room.wait_idle()
+        return backend
+
+    assert run(go()).spoke == ["Bo"]
+
+
+class CountingBackend:
+    def __init__(self, bids):
+        self.bids = list(bids)  # one list of urgencies per bid round, consumed in order
+        self.bid_calls = 0
+        self.spoke = []
+
+    async def bid(self, agent, roster, transcript, whiteboard=""):
+        self.bid_calls += 1
+        return self.bids[0](agent)
+
+    async def speak(self, agent, roster, transcript, whiteboard=""):
+        self.spoke.append(agent.name)
+        yield "done"
+
+
+def test_mention_hands_off_without_a_bid_round():
+    async def go():
+        backend = CountingBackend([lambda a: Bid(urgency=0.0, reason="")])
+        room = Room("r", [A, B, Agent("C", "c", "")], backend, RoomSettings(max_agent_turns=3))
+        await room.post_human("@B please start")
+        await room.wait_idle()
+        return backend
+
+    backend = run(go())
+    assert backend.spoke == ["B"]
+    assert backend.bid_calls == 2  # only the follow-up round (A and C), none for the handoff itself
+
+
+def test_room_waits_out_rate_limits_instead_of_going_quiet():
+    rounds = {"n": 0}
+
+    class Throttled:
+        spoke = []
+
+        async def bid(self, agent, roster, transcript, whiteboard=""):
+            if rounds["n"] < 2:  # first two bid rounds: everyone rate-limited
+                return Bid(urgency=0.0, reason="(rate limited)")
+            return Bid(urgency=0.8 if agent.name == "A" else 0.0, reason="")
+
+        async def speak(self, agent, roster, transcript, whiteboard=""):
+            self.spoke.append(agent.name)
+            yield "finally"
+
+    async def go():
+        backend = Throttled()
+        room = Room("r", [A, B], backend, RoomSettings(max_agent_turns=1, throttle_waits=(0.01, 0.01)))
+        orig = room.collect_bids
+
+        async def counting(muted=frozenset()):
+            result = await orig(muted)
+            rounds["n"] += 1
+            return result
+
+        room.collect_bids = counting
+        q = room.subscribe()
+        await room.post_human("hi")
+        await room.wait_idle()
+        notices = [e["text"] for e in [q.get_nowait() for _ in range(q.qsize())] if e["type"] == "notice"]
+        return backend, notices
+
+    backend, notices = run(go())
+    assert backend.spoke == ["A"]
+    assert len(notices) == 2 and "rate-limited" in notices[0]

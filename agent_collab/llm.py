@@ -200,6 +200,10 @@ class ProviderError(RuntimeError):
 
 
 class OpenAICompatBackend:
+    # Free tiers often answer "busy" (503) or "slow down" (429) for a few seconds; wait and retry.
+    RETRYABLE = frozenset({429, 500, 502, 503, 504})
+    RETRY_DELAYS = (1.5, 4.0)
+
     def __init__(self, client: httpx.AsyncClient | None = None, timeout: float = 120.0):
         self._client = client
         self.timeout = timeout
@@ -231,9 +235,15 @@ class OpenAICompatBackend:
                 _prompt(transcript, BID_INSTRUCTIONS.format(name=agent.name) + JSON_BID_SUFFIX, whiteboard),
                 temperature=0.2, max_tokens=1024,  # roomy enough for models that think out loud first
             )
-            r = await self.client.post(f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec))
+            for delay in (*self.RETRY_DELAYS[:1], None):  # bids are cheap: retry once, the room has a deadline
+                r = await self.client.post(f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec))
+                if r.status_code not in self.RETRYABLE or delay is None:
+                    break
+                await asyncio.sleep(delay)
             if r.status_code == 429:
                 return _failed_bid("(rate limited)")
+            if r.status_code == 503:
+                return _failed_bid("(provider busy)")
             r.raise_for_status()
             content = r.json()["choices"][0]["message"].get("content") or ""
         except (httpx.HTTPError, ProviderError, KeyError, IndexError, ValueError) as e:
@@ -248,29 +258,50 @@ class OpenAICompatBackend:
             temperature=0.7, max_tokens=2048, stream=True,
         )
         think = ThinkFilter()
-        async with self.client.stream(
-            "POST", f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec)
-        ) as r:
-            if r.status_code >= 400:
-                await r.aread()
-                raise ProviderError(f"{spec.label} returned {r.status_code}: {r.text[:200]}")
-            async for line in r.aiter_lines():
-                if not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
+        for delay in (*self.RETRY_DELAYS, None):
+            async with self.client.stream(
+                "POST", f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec)
+            ) as r:
+                if r.status_code in self.RETRYABLE and delay is not None:
+                    await r.aread()
+                elif r.status_code >= 400:
+                    await r.aread()
+                    raise ProviderError(f"{spec.label} returned {r.status_code}: {_error_text(r.text)}")
+                else:
+                    async for chunk in self._stream_text(r, think):
+                        yield chunk
                     break
-                try:
-                    delta = json.loads(payload)["choices"][0].get("delta", {}).get("content")
-                except (ValueError, KeyError, IndexError):
-                    continue
-                if delta:
-                    text = think.feed(delta)
-                    if text:
-                        yield text
+            await asyncio.sleep(delay)
         tail = think.flush()
         if tail:
             yield tail
+
+    @staticmethod
+    async def _stream_text(r: httpx.Response, think: "ThinkFilter") -> AsyncIterator[str]:
+        async for line in r.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                delta = json.loads(payload)["choices"][0].get("delta", {}).get("content")
+            except (ValueError, KeyError, IndexError):
+                continue
+            if delta:
+                text = think.feed(delta)
+                if text:
+                    yield text
+
+
+def _error_text(body: str) -> str:
+    """Pull the human-readable message out of a provider's JSON error body."""
+    try:
+        data = json.loads(body)
+        data = data[0] if isinstance(data, list) and data else data
+        return str(data.get("error", {}).get("message") or body)[:300]
+    except (ValueError, AttributeError):
+        return body[:300]
 
 
 def _describe(e: Exception) -> str:

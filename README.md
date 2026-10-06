@@ -56,7 +56,7 @@ shown on its messages, and agents are told which model each teammate runs on.
 |---|---|---|---|
 | **Ollama** (local) | Free, your hardware | Nothing: install [Ollama](https://ollama.com), `ollama pull llama3.2`. `OLLAMA_BASE_URL` for another host | `llama3.2`, `qwen3`, `mistral` |
 | **Groq** | Free tier, rate-limited | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
-| **Google Gemini** | Free tier, rate-limited | `GEMINI_API_KEY` (aistudio.google.com) | `gemini-2.5-flash` |
+| **Google Gemini** | Free tier, rate-limited | `GEMINI_API_KEY` (aistudio.google.com) | `gemini-flash-latest` |
 | **OpenRouter** | Models ending in `:free` are free | `OPENROUTER_API_KEY` | `meta-llama/llama-3.3-70b-instruct:free` |
 | **Hugging Face** | Free monthly credits | `HF_TOKEN` | `meta-llama/Llama-3.1-8B-Instruct` |
 | **Mistral** | Free experiment tier | `MISTRAL_API_KEY` | `mistral-small-latest` |
