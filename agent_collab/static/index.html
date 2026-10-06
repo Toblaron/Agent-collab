@@ -8,15 +8,17 @@
   :root {
     --bg: #f7f7f8; --panel: #ffffff; --text: #18181b; --muted: #71717a;
     --border: #e4e4e7; --human: #18181b; --accent: #2563eb; --bar: #e4e4e7;
+    --err-bg: #fef2f2; --err: #b91c1c;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg: #0b0b0d; --panel: #16161a; --text: #f4f4f5; --muted: #a1a1aa;
-            --border: #27272a; --human: #f4f4f5; --accent: #60a5fa; --bar: #27272a; }
+            --border: #27272a; --human: #f4f4f5; --accent: #60a5fa; --bar: #27272a;
+            --err-bg: #2a1215; --err: #fca5a5; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
          font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; height: 100vh; }
-  .app { display: grid; grid-template-columns: 1fr 280px; height: 100vh; }
+  .app { display: grid; grid-template-columns: 1fr 300px; height: 100vh; }
   main { display: flex; flex-direction: column; min-width: 0; }
   header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex;
            align-items: center; gap: 12px; }
@@ -30,34 +32,55 @@
   .msg { max-width: 760px; }
   .msg .who { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
   .msg .who span { font-weight: 400; color: var(--muted); }
+  .badge { font-size: 11px; font-weight: 400; color: var(--muted); border: 1px solid var(--border);
+           border-radius: 4px; padding: 0 5px; margin-left: 4px; white-space: nowrap; }
   .msg .body { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--c);
                border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; word-wrap: break-word; }
   .msg.human { align-self: flex-end; }
   .msg.human .body { border-left: 1px solid var(--border); border-right: 3px solid var(--human); }
   .msg.streaming .body::after { content: "▍"; animation: pulse .8s infinite; }
   .note { font-size: 12px; color: var(--muted); text-align: center; }
-  form { display: flex; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--border); }
-  textarea { flex: 1; resize: none; height: 46px; padding: 12px; border-radius: 8px;
-             border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit; }
+  .note.error { color: var(--err); background: var(--err-bg); border-radius: 6px; padding: 6px 10px; }
+  form.chat { display: flex; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--border); }
+  textarea, input, select { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+             background: var(--panel); color: var(--text); font: inherit; width: 100%; }
+  form.chat textarea { flex: 1; resize: none; height: 46px; padding: 12px; }
   button { border: 0; border-radius: 8px; padding: 0 16px; font: inherit; cursor: pointer;
            background: var(--accent); color: white; }
   button.secondary { background: var(--bar); color: var(--text); }
   aside { border-left: 1px solid var(--border); padding: 16px; overflow-y: auto; background: var(--panel); }
-  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 12px; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted);
+             margin: 0 0 12px; display: flex; align-items: center; }
+  aside h2 button { margin-left: auto; padding: 4px 10px; font-size: 12px; text-transform: none; letter-spacing: 0; }
   .agent { margin-bottom: 14px; }
   .agent .top { display: flex; align-items: baseline; gap: 6px; }
   .agent .name { font-weight: 600; color: var(--c); }
   .agent .role { font-size: 12px; color: var(--muted); }
   .agent .score { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .agent .remove { background: none; color: var(--muted); padding: 0 2px; font-size: 14px; line-height: 1; }
+  .agent .remove:hover { color: var(--err); }
+  .agent .model { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meter { height: 6px; background: var(--bar); border-radius: 3px; margin: 4px 0; overflow: hidden; }
   .meter i { display: block; height: 100%; width: 0; background: var(--c); transition: width .3s; }
   .agent .reason { font-size: 12px; color: var(--muted); min-height: 1em; }
   .agent.winner .name::after { content: " 🎤"; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 20px; line-height: 1.6; }
+  dialog { border: 1px solid var(--border); border-radius: 12px; background: var(--panel); color: var(--text);
+           padding: 20px; width: min(440px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgb(0 0 0 / .4); }
+  dialog h3 { margin: 0 0 14px; font-size: 16px; }
+  dialog label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  dialog .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  dialog .pnote { font-size: 12px; color: var(--muted); margin-top: 4px; min-height: 1em; }
+  dialog .pnote.bad { color: var(--err); }
+  dialog .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+  dialog .actions button { height: 36px; }
+  dialog input[type=color] { padding: 2px; height: 38px; }
+  #formError { color: var(--err); font-size: 13px; margin-top: 10px; min-height: 1em; }
   @media (max-width: 760px) {
     .app { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
-    aside { border-left: 0; border-top: 1px solid var(--border); max-height: 30vh; }
-    #log, form, header { padding-left: 16px; padding-right: 16px; }
+    aside { border-left: 0; border-top: 1px solid var(--border); max-height: 34vh; }
+    #log, form.chat, header { padding-left: 16px; padding-right: 16px; }
   }
 </style>
 </head>
@@ -70,31 +93,63 @@
       <div id="status" class="status"><span class="dot"></span><span id="statusText">connecting…</span></div>
     </header>
     <div id="log"></div>
-    <form id="form">
+    <form id="form" class="chat">
       <textarea id="input" placeholder="Give the team a task… (@Name to address someone, Enter to send)"></textarea>
       <button type="button" id="stop" class="secondary">Stop</button>
       <button type="submit">Send</button>
     </form>
   </main>
   <aside>
-    <h2>Who wants the floor</h2>
+    <h2>Who wants the floor <button type="button" id="addBtn">+ Add agent</button></h2>
     <div id="agents"></div>
     <p class="hint">After every message each agent privately bids 0–1 on how much it needs to speak.
       The highest bid above the threshold talks; agents that just spoke are penalised.
-      When nobody bids high enough, the room goes quiet. Your message interrupts whoever is speaking.</p>
+      When nobody bids high enough, the room goes quiet. Your message interrupts whoever is speaking.
+      Agents can run on different LLMs: mix Claude with free models via <b>+ Add agent</b>.</p>
   </aside>
 </div>
+
+<dialog id="addDialog">
+  <form id="addForm" method="dialog">
+    <h3>Add an agent</h3>
+    <div class="row">
+      <div><label for="fName">Name</label><input id="fName" required maxlength="20" placeholder="Eli"></div>
+      <div><label for="fRole">Role</label><input id="fRole" maxlength="40" placeholder="designer"></div>
+    </div>
+    <label for="fProvider">LLM provider</label>
+    <select id="fProvider"></select>
+    <div id="fProviderNote" class="pnote"></div>
+    <label for="fModel">Model</label>
+    <input id="fModel" list="fModels" placeholder="loading models…" autocomplete="off">
+    <datalist id="fModels"></datalist>
+    <label for="fPersona">Personality &amp; expertise</label>
+    <textarea id="fPersona" rows="3" maxlength="2000"
+      placeholder="You care about the user experience above all. You sketch flows and question jargon."></textarea>
+    <div class="row">
+      <div><label for="fColor">Colour</label><input id="fColor" type="color" value="#d97706"></div>
+      <div></div>
+    </div>
+    <div id="formError"></div>
+    <div class="actions">
+      <button type="button" class="secondary" id="cancelAdd">Cancel</button>
+      <button type="submit" id="submitAdd">Add to room</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 const roomId = (location.hash.slice(1) || "lobby").replace(/[^\w-]/g, "");
 document.getElementById("room").textContent = "#" + roomId;
 const log = document.getElementById("log");
 const agentsEl = document.getElementById("agents");
 const colors = { Human: "var(--human)" };
-const roles = {};
+const info = {};   // name -> agent dict
 const streaming = {};
+let providers = [];
 
 function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 80; }
 function scroll(stick) { if (stick) log.scrollTop = log.scrollHeight; }
+function shortModel(m) { return (m || "").split("/").pop(); }
 
 function bubble(author, text, id) {
   document.getElementById("empty")?.remove();
@@ -107,7 +162,12 @@ function bubble(author, text, id) {
   who.className = "who";
   who.style.color = colors[author] || "";
   who.textContent = author + " ";
-  if (roles[author]) { const r = document.createElement("span"); r.textContent = roles[author]; who.append(r); }
+  const a = info[author];
+  if (a) {
+    const r = document.createElement("span"); r.textContent = a.role; who.append(r);
+    const b = document.createElement("span"); b.className = "badge"; b.textContent = shortModel(a.model);
+    b.title = a.provider + " · " + a.model; who.append(b);
+  }
   const body = document.createElement("div");
   body.className = "body";
   body.textContent = text;
@@ -117,9 +177,9 @@ function bubble(author, text, id) {
   return el;
 }
 
-function note(text) {
+function note(text, cls) {
   const el = document.createElement("div");
-  el.className = "note"; el.textContent = text;
+  el.className = "note" + (cls ? " " + cls : ""); el.textContent = text;
   const stick = atBottom(); log.append(el); scroll(stick);
   return el;
 }
@@ -127,13 +187,19 @@ function note(text) {
 function renderAgents(agents) {
   agentsEl.innerHTML = "";
   for (const a of agents) {
-    colors[a.name] = a.color; roles[a.name] = a.role;
+    colors[a.name] = a.color; info[a.name] = a;
     const el = document.createElement("div");
     el.className = "agent"; el.id = "agent-" + a.name; el.style.setProperty("--c", a.color);
-    el.innerHTML = `<div class="top"><span class="name"></span><span class="role"></span><span class="score"></span></div>
-      <div class="meter"><i></i></div><div class="reason"></div>`;
+    el.innerHTML = `<div class="top"><span class="name"></span><span class="role"></span><span class="score"></span>
+      <button class="remove" title="Remove from room">×</button></div>
+      <div class="model"></div><div class="meter"><i></i></div><div class="reason"></div>`;
     el.querySelector(".name").textContent = a.name;
     el.querySelector(".role").textContent = a.role;
+    const prov = providers.find(p => p.id === a.provider);
+    el.querySelector(".model").textContent = (prov ? prov.label : a.provider) + " · " + a.model;
+    el.querySelector(".remove").onclick = () => {
+      if (confirm(`Remove ${a.name} from the room?`)) send({ type: "remove_agent", name: a.name });
+    };
     agentsEl.append(el);
   }
 }
@@ -143,7 +209,7 @@ function renderBids(bids, winner) {
     el.classList.remove("winner");
     el.querySelector(".meter i").style.width = "0";
     el.querySelector(".score").textContent = "—";
-    el.querySelector(".reason").textContent = "just spoke";
+    el.querySelector(".reason").textContent = "sitting out";
   }
   for (const b of bids) {
     const el = document.getElementById("agent-" + b.agent);
@@ -163,6 +229,7 @@ function setStatus(state) {
 }
 
 let ws;
+function send(obj) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj)); }
 function connect() {
   ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + roomId);
   ws.onmessage = (e) => {
@@ -173,6 +240,13 @@ function connect() {
         ev.messages.forEach(m => bubble(m.author, m.text, m.id));
         setStatus(ev.running ? "running" : "idle");
         if (!ev.messages.length) note("Give the team a task to get started.").id = "empty";
+        break;
+      case "roster": renderAgents(ev.agents); break;
+      case "notice": note(ev.text); break;
+      case "error": note(`${ev.agent} couldn't respond: ${ev.text}`, "error"); break;
+      case "agent_error":
+        document.getElementById("formError").textContent = ev.text;
+        if (!document.getElementById("addDialog").open) note(ev.text, "error");
         break;
       case "message": bubble(ev.message.author, ev.message.text, ev.message.id); break;
       case "status": setStatus(ev.state); break;
@@ -198,21 +272,89 @@ function connect() {
   };
   ws.onclose = () => { setStatus("disconnected — retrying"); setTimeout(connect, 1500); };
 }
-connect();
 
+// ---- chat input ----
 const input = document.getElementById("input");
 document.getElementById("form").onsubmit = (e) => {
   e.preventDefault();
   const text = input.value.trim();
-  if (!text || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: "say", text }));
+  if (!text) return;
+  send({ type: "say", text });
   input.value = "";
 };
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("form").requestSubmit(); }
 });
-document.getElementById("stop").onclick = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: "stop" }));
+document.getElementById("stop").onclick = () => send({ type: "stop" });
 window.addEventListener("hashchange", () => location.reload());
+
+// ---- add-agent dialog ----
+const dlg = document.getElementById("addDialog");
+const fProvider = document.getElementById("fProvider");
+const fModel = document.getElementById("fModel");
+const modelCache = {};
+
+async function loadProviders() {
+  providers = await (await fetch("/api/providers")).json();
+  fProvider.innerHTML = "";
+  for (const p of providers) {
+    const o = document.createElement("option");
+    o.value = p.id;
+    o.textContent = p.label + (p.configured ? "" : " — not configured");
+    fProvider.append(o);
+  }
+  const firstFree = providers.find(p => p.id !== "anthropic" && p.configured);
+  fProvider.value = (firstFree || providers[0]).id;
+}
+
+async function onProviderChange() {
+  const p = providers.find(x => x.id === fProvider.value);
+  const pn = document.getElementById("fProviderNote");
+  pn.textContent = p.configured ? p.note : `Not configured: set ${p.id === "custom" ? "CUSTOM_LLM_BASE_URL" : p.key_env} and restart. ${p.note}`;
+  pn.className = "pnote" + (p.configured ? "" : " bad");
+  document.getElementById("submitAdd").disabled = !p.configured;
+  fModel.value = p.default_model;
+  const dl = document.getElementById("fModels");
+  dl.innerHTML = "";
+  if (!p.configured) return;
+  fModel.placeholder = "loading models…";
+  const models = modelCache[p.id] ||= (await (await fetch(`/api/providers/${p.id}/models`)).json()).models;
+  if (fProvider.value !== p.id) return;  // user switched while loading
+  for (const m of models) { const o = document.createElement("option"); o.value = m; dl.append(o); }
+  fModel.placeholder = `${models.length} available — type to filter`;
+}
+
+fProvider.onchange = onProviderChange;
+document.getElementById("addBtn").onclick = async () => {
+  document.getElementById("formError").textContent = "";
+  if (!providers.length) await loadProviders();
+  await onProviderChange();
+  dlg.showModal();
+  document.getElementById("fName").focus();
+};
+document.getElementById("cancelAdd").onclick = () => dlg.close();
+document.getElementById("addForm").onsubmit = (e) => {
+  e.preventDefault();
+  document.getElementById("formError").textContent = "";
+  const agent = {
+    name: document.getElementById("fName").value.trim(),
+    role: document.getElementById("fRole").value.trim(),
+    provider: fProvider.value,
+    model: fModel.value.trim(),
+    persona: document.getElementById("fPersona").value.trim(),
+    color: document.getElementById("fColor").value,
+  };
+  // Close only once the server confirms the agent joined (roster event); errors land in #formError.
+  send({ type: "add_agent", agent });
+  const check = setInterval(() => {
+    if (document.getElementById("agent-" + agent.name)) {
+      clearInterval(check); dlg.close(); document.getElementById("addForm").reset();
+    } else if (document.getElementById("formError").textContent) clearInterval(check);
+  }, 100);
+  setTimeout(() => clearInterval(check), 5000);
+};
+
+loadProviders().then(connect, connect);
 </script>
 </body>
 </html>

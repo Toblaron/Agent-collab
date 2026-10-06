@@ -14,10 +14,11 @@ import contextlib
 import random
 from dataclasses import dataclass
 
-from .agents import Agent, Message
+from .agents import Agent, AgentError, Message, agent_from_dict
 from .llm import Backend, Bid
 
 HUMAN = "Human"
+MAX_AGENTS = 8
 
 
 @dataclass
@@ -72,7 +73,7 @@ class Room:
         return {
             "type": "history",
             "room": self.id,
-            "agents": [{"name": a.name, "role": a.role, "color": a.color} for a in self.agents],
+            "agents": [a.to_dict() for a in self.agents],
             "messages": [m.to_dict() for m in self.messages],
             "running": self.running,
         }
@@ -95,6 +96,25 @@ class Room:
                 await self._task
         self._task = None
 
+    def add_agent(self, data: dict) -> Agent:
+        if len(self.agents) >= MAX_AGENTS:
+            raise AgentError(f"A room holds at most {MAX_AGENTS} agents.")
+        agent = agent_from_dict(data, self.agents)
+        self.agents = [*self.agents, agent]  # new list: in-flight turns keep their snapshot
+        self._emit_roster()
+        self._emit({"type": "notice", "text": f"{agent.name} ({agent.model_id}) joined the room"})
+        return agent
+
+    def remove_agent(self, name: str) -> None:
+        if not any(a.name == name for a in self.agents):
+            raise AgentError(f"No agent called {name}.")
+        self.agents = [a for a in self.agents if a.name != name]
+        self._emit_roster()
+        self._emit({"type": "notice", "text": f"{name} left the room"})
+
+    def _emit_roster(self) -> None:
+        self._emit({"type": "roster", "agents": [a.to_dict() for a in self.agents]})
+
     async def wait_idle(self) -> None:
         if self._task:
             await self._task
@@ -111,9 +131,9 @@ class Room:
         jitter = self._rng.uniform(0, 0.01)  # break exact ties without favouring roster order
         return bid.urgency - self.settings.dominance_penalty * recent_turns + jitter
 
-    async def collect_bids(self) -> list[ScoredBid]:
+    async def collect_bids(self, muted: set[str] = frozenset()) -> list[ScoredBid]:
         last_author = self.messages[-1].author if self.messages else None
-        bidders = [a for a in self.agents if a.name != last_author]
+        bidders = [a for a in self.agents if a.name != last_author and a.name not in muted]
         transcript = list(self.messages)
         bids = await asyncio.gather(*(self.backend.bid(a, self.agents, transcript) for a in bidders))
         scored = [ScoredBid(a, b, self._score(a, b)) for a, b in zip(bidders, bids)]
@@ -121,10 +141,11 @@ class Room:
 
     async def _conversation_loop(self) -> None:
         self._emit({"type": "status", "state": "running"})
+        muted: set[str] = set()  # agents whose provider failed this round
         try:
             for _ in range(self.settings.max_agent_turns):
                 self._emit({"type": "status", "state": "bidding"})
-                bids = await self.collect_bids()
+                bids = await self.collect_bids(muted)
                 winner = bids[0] if bids and bids[0].score >= self.settings.speak_threshold else None
                 self._emit(
                     {
@@ -135,7 +156,11 @@ class Room:
                 )
                 if winner is None:
                     break  # natural silence: nobody has anything worth adding
-                await self._speak(winner.agent)
+                try:
+                    await self._speak(winner.agent)
+                except Exception as e:  # provider down, bad model ID, rate limit...
+                    muted.add(winner.agent.name)
+                    self._emit({"type": "error", "agent": winner.agent.name, "text": f"{type(e).__name__}: {e}"[:300]})
         finally:
             self._emit({"type": "status", "state": "idle"})
 

@@ -5,6 +5,9 @@ jump in when they have something to add, hand work to each other with `@mentions
 and go quiet when the job's done. You're in the room too, and your message interrupts whoever
 is talking.
 
+Agents don't have to run on the same model. Put Claude, a local Llama on Ollama, Gemini and a
+free OpenRouter model in one room and let them work it out together.
+
 ## How "natural" turn-taking works
 
 Most multi-agent demos use round-robin (robotic) or a moderator LLM (bottleneck + extra call
@@ -37,17 +40,62 @@ the same room all see the same live conversation.
 
 **No key / UI work:** `AGENT_COLLAB_MOCK=1 agent-collab` runs a deterministic offline backend.
 
+## Mixing in free LLMs
+
+Click **+ Add agent** in the sidebar and pick a provider, a model (the list is fetched live from
+the provider), a role and a personality. Remove an agent with **×**. Every agent's model is
+shown on its messages, and agents are told which model each teammate runs on.
+
+| Provider | Cost | Enable it with | Example model |
+|---|---|---|---|
+| **Ollama** (local) | Free, your hardware | Nothing: install [Ollama](https://ollama.com), `ollama pull llama3.2`. `OLLAMA_BASE_URL` for another host | `llama3.2`, `qwen3`, `mistral` |
+| **Groq** | Free tier, rate-limited | `GROQ_API_KEY` | `llama-3.3-70b-versatile` |
+| **Google Gemini** | Free tier, rate-limited | `GEMINI_API_KEY` (aistudio.google.com) | `gemini-2.5-flash` |
+| **OpenRouter** | Models ending in `:free` are free | `OPENROUTER_API_KEY` | `meta-llama/llama-3.3-70b-instruct:free` |
+| **Hugging Face** | Free monthly credits | `HF_TOKEN` | `meta-llama/Llama-3.1-8B-Instruct` |
+| **Mistral** | Free experiment tier | `MISTRAL_API_KEY` | `mistral-small-latest` |
+| **Custom** | — | `CUSTOM_LLM_BASE_URL` (+ optional `CUSTOM_LLM_API_KEY`, `CUSTOM_LLM_MODEL`) | LM Studio, vLLM, llama.cpp server… |
+| **Claude** | Paid API | `ANTHROPIC_API_KEY` or `ant auth login` | `claude-opus-5-5` |
+
+Set the env vars, restart, and unconfigured providers light up in the picker. Free-tier models,
+IDs and limits change often; the live model list in the dialog is the source of truth, and the
+examples above are just defaults.
+
+**Run the whole room for free:** move the starter team off Claude:
+
+```bash
+AGENT_COLLAB_DEFAULT_PROVIDER=ollama AGENT_COLLAB_DEFAULT_MODEL=llama3.2 agent-collab
+```
+
+How non-Claude agents work:
+
+- **One adapter for all of them.** Every free provider speaks the OpenAI-compatible
+  `/chat/completions` API, so `OpenAICompatBackend` covers them all; `RoutingBackend` sends each
+  agent to Claude or to that adapter based on its provider.
+- **Lenient bids.** Not every free model supports JSON mode, so bids are requested as JSON and
+  parsed leniently (code fences, chatter, bare `urgency: 0.6` all work). Anything unparseable
+  counts as "stay quiet".
+- **Reasoning models.** `<think>…</think>` blocks (DeepSeek-R1, Qwen3…) are stripped from both
+  bids and streamed replies, even when the tags are split across stream chunks.
+- **Failure isolation.** A rate limit, a wrong model ID or Ollama not running mutes that agent for
+  the rest of the round and shows a red error line; everyone else keeps talking. Bid failures show
+  up as the agent's reason in the sidebar (`(rate limited)`, `(error: can't connect)`).
+- **No arbitrary URLs from the browser.** Provider base URLs come only from the built-in table or
+  env vars, so the UI can't be used to make the server call arbitrary hosts.
+
 ## Configuration
 
 | Env var | Default | Notes |
 |---|---|---|
-| `AGENT_COLLAB_MODEL` | `claude-opus-5-5` | Used for both bidding and speaking |
-| `AGENT_COLLAB_BID_EFFORT` | `low` | Bids are cheap yes/no-ish calls |
-| `AGENT_COLLAB_SPEAK_EFFORT` | `medium` | Raise to `high` for harder tasks |
+| `AGENT_COLLAB_MODEL` | `claude-opus-5-5` | Default Claude model (bidding and speaking) |
+| `AGENT_COLLAB_DEFAULT_PROVIDER` | `anthropic` | Provider for the starter team (`ollama`, `groq`, …) |
+| `AGENT_COLLAB_DEFAULT_MODEL` | provider default | Model for the starter team |
+| `AGENT_COLLAB_BID_EFFORT` | `low` | Claude only. Bids are cheap yes/no-ish calls |
+| `AGENT_COLLAB_SPEAK_EFFORT` | `medium` | Claude only. Raise to `high` for harder tasks |
 | `AGENT_COLLAB_MOCK` | unset | `1` = offline mock backend |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | |
 
-Requests use prompt caching (stable system prompt per agent), structured outputs for bids
+Claude requests use prompt caching (stable system prompt per agent), structured outputs for bids
 (`messages.parse` + Pydantic), and server-side refusal fallbacks (`fallbacks="default"`).
 
 **Cost note:** each agent turn costs N−1 bid calls + 1 speak call (4 agents → 3 bids + 1 reply).
@@ -58,25 +106,29 @@ Roadmap).
 
 ```
 agent_collab/
-  agents.py    Agent personas, Message, default roster (Ada/Bo/Cy/Dee)
-  llm.py       Backend protocol, ClaudeBackend (bid + stream), MockBackend
+  agents.py    Agent personas (+ provider/model), validation, default roster (Ada/Bo/Cy/Dee)
+  providers.py Provider table (Claude, Ollama, Groq, Gemini, OpenRouter, HF, Mistral, custom)
+  llm.py       ClaudeBackend, OpenAICompatBackend, RoutingBackend, MockBackend
   room.py      Room: bidding, scoring, speaking, interruption, pub/sub
-  server.py    FastAPI app — GET /, GET /healthz, WS /ws/{room}
+  server.py    FastAPI app — GET /, /healthz, /api/providers[/{id}/models], WS /ws/{room}
   static/      Single-file UI (no build step)
 tests/         Turn-taking + WebSocket tests (no API calls)
 ```
 
-WebSocket protocol — client sends `{"type":"say","text":...}` or `{"type":"stop"}`; server
-emits `history`, `message`, `status`, `bids`, `stream_start`, `stream_delta`, `stream_end`.
+WebSocket protocol — client sends `say`, `stop`, `add_agent` (`{"agent": {name, role, provider,
+model, persona, color}}`) and `remove_agent` (`{"name"}`); server emits `history`, `roster`,
+`message`, `status`, `bids`, `stream_start`, `stream_delta`, `stream_end`, `notice`, `error`
+(an agent's provider failed) and `agent_error` (invalid add/remove, sent only to the requester).
 
 ## Customising the team
 
-Edit `DEFAULT_ROSTER` in `agents.py`. Each `Agent` is a name, role, persona paragraph and
-colour; the shared room etiquette lives in `Agent.system_prompt`.
+Add agents from the UI, or edit `DEFAULT_ROSTER` in `agents.py` (each `Agent` takes an optional
+`provider=` and `model=`). The shared room etiquette lives in `Agent.system_prompt`.
 
 ## Roadmap
 
-- Separate `AGENT_COLLAB_BID_MODEL` so bids can run on a cheaper model
+- Separate bid model per agent (e.g. bid on a small local model, speak on a big one)
+- Save/load named rosters
 - Tools per agent (web search, code execution, a shared scratchpad/whiteboard)
 - Persistence (SQLite) and room/roster creation from the UI
 - Private side-channels (agent ↔ agent DMs) and a task board agents can claim items from

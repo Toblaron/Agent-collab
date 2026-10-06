@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
+
+from .providers import PROVIDERS
+
+MAX_PERSONA_CHARS = 2000
+NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,19}$")
 
 
 @dataclass(frozen=True)
@@ -13,9 +19,29 @@ class Agent:
     role: str
     persona: str
     color: str = "#6b7280"
+    provider: str = "anthropic"
+    model: str | None = None  # None = provider default
+
+    @property
+    def model_id(self) -> str:
+        return self.model or PROVIDERS[self.provider].default_model
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} ({self.role}, running on {self.model_id})"
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "role": self.role,
+            "persona": self.persona,
+            "color": self.color,
+            "provider": self.provider,
+            "model": self.model_id,
+        }
 
     def system_prompt(self, roster: list["Agent"]) -> str:
-        others = "\n".join(f"- {a.name} ({a.role})" for a in roster if a.name != self.name)
+        others = "\n".join(f"- {a.label}" for a in roster if a.name != self.name)
         return (
             f"You are {self.name}, the {self.role} in a small team working together in a shared chat room.\n\n"
             f"{self.persona}\n\n"
@@ -29,6 +55,35 @@ class Agent:
             "(a plan, code, a draft) that someone asked for.\n"
             "- When the team's task is done, say so plainly so others can stop."
         )
+
+
+class AgentError(ValueError):
+    pass
+
+
+def agent_from_dict(data: dict, existing: list[Agent]) -> Agent:
+    """Validate an agent definition coming from the UI."""
+    name = str(data.get("name", "")).strip()
+    if not NAME_RE.match(name):
+        raise AgentError("Name must start with a letter and be 1-20 letters, digits, - or _.")
+    if name.lower() == "human" or any(a.name.lower() == name.lower() for a in existing):
+        raise AgentError(f"There is already someone called {name} in the room.")
+    provider = str(data.get("provider", "")).strip()
+    if provider not in PROVIDERS:
+        raise AgentError(f"Unknown provider {provider!r}.")
+    spec = PROVIDERS[provider]
+    if not spec.configured:
+        missing = spec.base_url_env if provider == "custom" else spec.key_env
+        raise AgentError(f"{spec.label} is not configured. Set {missing} and restart the server.")
+    model = str(data.get("model", "")).strip() or None
+    if model and len(model) > 200:
+        raise AgentError("Model ID is too long.")
+    role = str(data.get("role", "")).strip()[:40] or "teammate"
+    persona = str(data.get("persona", "")).strip()[:MAX_PERSONA_CHARS] or f"You are a thoughtful {role}."
+    color = str(data.get("color", "")).strip()
+    if not re.match(r"^#[0-9a-fA-F]{6}$", color):
+        color = "#6b7280"
+    return Agent(name=name, role=role, persona=persona, color=color, provider=provider, model=model)
 
 
 @dataclass

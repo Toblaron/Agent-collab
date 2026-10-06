@@ -1,17 +1,19 @@
-"""FastAPI app: serves the UI and a WebSocket per room."""
+"""FastAPI app: serves the UI, provider info, and a WebSocket per room."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from .agents import DEFAULT_ROSTER
-from .llm import Backend, ClaudeBackend, MockBackend
+from .agents import DEFAULT_ROSTER, Agent, AgentError
+from .llm import Backend, MockBackend, RoutingBackend
+from .providers import PROVIDERS, list_models
 from .room import Room
 
 STATIC = Path(__file__).parent / "static"
@@ -20,7 +22,17 @@ STATIC = Path(__file__).parent / "static"
 def make_backend() -> Backend:
     if os.environ.get("AGENT_COLLAB_MOCK") == "1":
         return MockBackend(delay=0.04)
-    return ClaudeBackend()
+    return RoutingBackend()
+
+
+def default_roster() -> list[Agent]:
+    """The starter team. AGENT_COLLAB_DEFAULT_PROVIDER / _MODEL move it off Claude,
+    e.g. to run the whole room for free on Ollama or Groq."""
+    provider = os.environ.get("AGENT_COLLAB_DEFAULT_PROVIDER", "anthropic")
+    if provider not in PROVIDERS:
+        raise SystemExit(f"AGENT_COLLAB_DEFAULT_PROVIDER={provider!r} is not one of {sorted(PROVIDERS)}")
+    model = os.environ.get("AGENT_COLLAB_DEFAULT_MODEL") or None
+    return [dataclasses.replace(a, provider=provider, model=model) for a in DEFAULT_ROSTER]
 
 
 def create_app(backend: Backend | None = None) -> FastAPI:
@@ -30,7 +42,7 @@ def create_app(backend: Backend | None = None) -> FastAPI:
 
     def get_room(room_id: str) -> Room:
         if room_id not in rooms:
-            rooms[room_id] = Room(room_id, list(DEFAULT_ROSTER), shared_backend)
+            rooms[room_id] = Room(room_id, default_roster(), shared_backend)
         return rooms[room_id]
 
     @app.get("/")
@@ -40,6 +52,19 @@ def create_app(backend: Backend | None = None) -> FastAPI:
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"ok": True, "rooms": len(rooms)}
+
+    @app.get("/api/providers")
+    async def providers() -> list[dict]:
+        return [p.to_dict() for p in PROVIDERS.values()]
+
+    @app.get("/api/providers/{provider_id}/models")
+    async def provider_models(provider_id: str) -> dict:
+        spec = PROVIDERS.get(provider_id)
+        if spec is None:
+            raise HTTPException(404, "unknown provider")
+        if not spec.configured or isinstance(shared_backend, MockBackend):
+            return {"models": [spec.default_model]}
+        return {"models": await list_models(spec) or [spec.default_model]}
 
     @app.websocket("/ws/{room_id}")
     async def room_socket(ws: WebSocket, room_id: str) -> None:
@@ -57,10 +82,18 @@ def create_app(backend: Backend | None = None) -> FastAPI:
             while True:
                 data = await ws.receive_json()
                 kind = data.get("type")
-                if kind == "say" and str(data.get("text", "")).strip():
-                    await room.post_human(str(data["text"]).strip())
-                elif kind == "stop":
-                    await room.stop()
+                try:
+                    if kind == "say" and str(data.get("text", "")).strip():
+                        await room.post_human(str(data["text"]).strip())
+                    elif kind == "stop":
+                        await room.stop()
+                    elif kind == "add_agent" and isinstance(data.get("agent"), dict):
+                        room.add_agent(data["agent"])
+                    elif kind == "remove_agent":
+                        room.remove_agent(str(data.get("name", "")))
+                except AgentError as e:
+                    # Only the sender needs to hear about their own invalid form input.
+                    queue.put_nowait({"type": "agent_error", "text": str(e)})
         except WebSocketDisconnect:
             pass
         finally:
