@@ -214,14 +214,16 @@ def test_auto_roster_gives_every_usable_provider_an_agent(monkeypatch):
     team = server.default_roster()
     assert [(a.name, a.provider, a.model) for a in team] == [
         ("Turing", "gemini", "gemini-model"), ("Tesla", "groq", "groq-model"),
-        ("Socrates", "gemini", "gemini-model"), ("Curie", "groq", "groq-model"),
-    ]
+        ("Socrates", "gemini", "gemini-model"), ("Curie", "groq", "openai/gpt-oss-120b"),
+    ]  # Groq's second seat runs OpenAI's open model, so the team mixes model families
 
     six = {"gemini", "groq", "openrouter", "mistral", "huggingface", "ollama"}
     monkeypatch.setattr(server, "check_providers", lambda refresh=False: fake(six))
     team = server.default_roster()
-    assert len(team) == 6 and {a.provider for a in team} == six
-    assert [a.name for a in team][4:] == ["DaVinci", "Feynman"]
+    assert len(team) == 7 and {a.provider for a in team} == six  # no seat to share: gpt-oss gets a new one
+    assert [(a.name, a.model) for a in team][4:] == [
+        ("DaVinci", "huggingface-model"), ("Feynman", "ollama-model"), ("Franklin", "openai/gpt-oss-120b"),
+    ]
 
     monkeypatch.setattr(server, "check_providers", lambda refresh=False: fake(set()))
     assert {a.provider for a in server.default_roster()} == {"anthropic"}  # nothing usable: plain default
@@ -673,3 +675,25 @@ def test_openai_model_list_skips_non_chat_models():
     # Groq also hosts OpenAI's free open-weight models; they're a fallback when Llama's quota runs out
     assert "openai/gpt-oss-120b" in candidate_models("groq", "llama-3.3-70b-versatile",
                                                     ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"])
+
+
+def test_gpt_oss_seat_follows_what_the_host_lists(monkeypatch):
+    from agent_collab import server
+    from agent_collab.server import ProviderCheck
+
+    monkeypatch.setenv("AGENT_COLLAB_DEFAULT_PROVIDER", "auto")
+    no_oss = [ProviderCheck("gemini", True, "g", ""), ProviderCheck("groq", True, "llama", "", ("llama",))]
+    monkeypatch.setattr(server, "check_providers", lambda refresh=False: no_oss)
+    assert not any("gpt-oss" in a.model_id for a in server.default_roster())  # Groq doesn't list it
+
+    via_openrouter = [ProviderCheck("gemini", True, "g", ""),
+                      ProviderCheck("openrouter", True, "x:free", "", ("openai/gpt-oss-120b:free", "x:free"))]
+    monkeypatch.setattr(server, "check_providers", lambda refresh=False: via_openrouter)
+    team = server.default_roster()
+    assert [a.model_id for a in team].count("openai/gpt-oss-120b:free") == 1
+
+    monkeypatch.setenv("AGENT_COLLAB_DEFAULT_PROVIDER", "groq")
+    team = server.default_roster()
+    assert [a.model_id for a in team] == ["llama-3.3-70b-versatile"] * 3 + ["openai/gpt-oss-120b"]
+    monkeypatch.setenv("AGENT_COLLAB_DEFAULT_MODEL", "qwen-x")  # an explicit model wins for everyone
+    assert {a.model_id for a in server.default_roster()} == {"qwen-x"}

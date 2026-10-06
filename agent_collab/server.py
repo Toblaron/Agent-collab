@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as FuturesTimeout
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -44,6 +44,7 @@ class ProviderCheck:
     ok: bool
     model: str | None
     note: str
+    models: tuple[str, ...] = field(default=(), compare=False, repr=False)  # listed ids; empty = unknown
 
 
 def probe_chat(spec, model: str, timeout: float = 12.0) -> tuple[int, str]:
@@ -95,7 +96,7 @@ def check_provider(pid: str, budget: float = CHECK_DEADLINE) -> ProviderCheck:
         if not ids:
             return ProviderCheck(pid, False, None, "running, but no models pulled (ollama pull llama3.2:1b)")
         model = pick_model(pid, spec.default_model, ids)
-        return ProviderCheck(pid, True, model, "ok")
+        return ProviderCheck(pid, True, model, models=tuple(ids), note="ok")
 
     busy: str | None = None
     tried = []
@@ -106,7 +107,7 @@ def check_provider(pid: str, budget: float = CHECK_DEADLINE) -> ProviderCheck:
         status, body = probe_chat(spec, model, timeout=min(12.0, remaining))
         if status == 200:
             note = "ok" if model == spec.default_model else f"ok (using {model}; {', '.join(tried)} unavailable)"
-            return ProviderCheck(pid, True, model, note)
+            return ProviderCheck(pid, True, model, models=tuple(ids), note=note)
         if status in (401, 403):
             return ProviderCheck(pid, False, None, f"key rejected (HTTP {status}): check {spec.key_env} in keys.env")
         if status == 429 and quota_used_up(httpx.Response(429, text=body)):
@@ -116,10 +117,10 @@ def check_provider(pid: str, budget: float = CHECK_DEADLINE) -> ProviderCheck:
             busy = model  # works, just busy/limited right now; keep looking for one that answers
         tried.append(model)
     if busy:
-        return ProviderCheck(pid, True, busy, "ok, but busy/rate-limited right now (agents will retry)")
+        return ProviderCheck(pid, True, busy, models=tuple(ids), note="ok, but busy/rate-limited right now (agents will retry)")
     if not tried:  # ran out of time before any test message: the key is valid (listing worked)
         model = candidate_models(pid, spec.default_model, ids)[0]
-        return ProviderCheck(pid, True, model, "key ok; slow to answer (not fully tested)")
+        return ProviderCheck(pid, True, model, models=tuple(ids), note="key ok; slow to answer (not fully tested)")
     return ProviderCheck(pid, False, None, f"no model answered (tried {', '.join(tried)})")
 
 
@@ -203,13 +204,44 @@ def default_roster() -> list[Agent]:
             return list(DEFAULT_ROSTER)
         candidates = [*DEFAULT_ROSTER, *EXTRA_ROSTER]
         size = max(len(DEFAULT_ROSTER), min(len(usable), len(candidates)))
-        return [
+        team = [
             dataclasses.replace(candidates[i], provider=usable[i % len(usable)].id, model=usable[i % len(usable)].model)
             for i in range(size)
         ]
+        return with_gpt_oss(team, usable, candidates)
     if provider not in PROVIDERS:
         raise SystemExit(f"AGENT_COLLAB_DEFAULT_PROVIDER={provider!r} is not 'auto' or one of {sorted(PROVIDERS)}")
-    return [dataclasses.replace(a, provider=provider, model=model) for a in DEFAULT_ROSTER]
+    team = [dataclasses.replace(a, provider=provider, model=model) for a in DEFAULT_ROSTER]
+    if model is None and provider in GPT_OSS:  # a one-provider team still gets an OpenAI voice
+        team[-1] = dataclasses.replace(team[-1], model=GPT_OSS[provider])
+    return team
+
+
+# OpenAI's free open-weight model, by host. One starter agent runs on it so every
+# default team mixes model families (Llama/Gemini/Mistral… plus an OpenAI model).
+GPT_OSS = {"groq": "openai/gpt-oss-120b", "openrouter": "openai/gpt-oss-120b:free"}
+
+
+def with_gpt_oss(team: list[Agent], usable: list[ProviderCheck], candidates: list[Agent]) -> list[Agent]:
+    """Put one agent on gpt-oss-120b when a usable provider hosts it. Takes a seat from a provider
+    that has two agents, else adds a seat, else (team full) moves the host's own agent."""
+    if any("gpt-oss-120b" in a.model_id for a in team):
+        return team
+    host = next((c for c in usable if c.id in GPT_OSS and (not c.models or GPT_OSS[c.id] in c.models)), None)
+    if host is None:
+        return team
+    oss = GPT_OSS[host.id]
+    counts = {p: sum(a.provider == p for a in team) for p in {a.provider for a in team}}
+    shared = [i for i, a in enumerate(team) if counts[a.provider] > 1]
+    if shared:
+        i = next((i for i in reversed(shared) if team[i].provider == host.id), shared[-1])
+        team[i] = dataclasses.replace(team[i], provider=host.id, model=oss)
+    elif len(team) < len(candidates):
+        team.append(dataclasses.replace(candidates[len(team)], provider=host.id, model=oss))
+    else:
+        i = next(i for i, a in enumerate(team) if a.provider == host.id)
+        team[i] = dataclasses.replace(team[i], model=oss)
+    return team
 
 
 _UNSET = object()

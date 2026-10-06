@@ -68,6 +68,8 @@ shown on its messages, and agents are told which model each teammate runs on.
 (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`) are free on **Groq** and on **OpenRouter** (the
 `:free` variants). With a Groq key already set: **[edit]** an agent → provider Groq → model
 `openai/gpt-oss-120b`. They're also on the automatic fallback list when a Groq model's quota runs out.
+New rooms do this for you: when Groq or OpenRouter is set up, one starter agent runs on
+`gpt-oss-120b`, so the default team mixes model families (it takes a provider's second seat, or adds a seat).
 If you do have an OpenAI account, opting in to data sharing (platform.openai.com → Settings → Data
 controls) gives eligible accounts free tokens every day on selected models (the mini models get the
 biggest allowance). Past that allowance requests are billed, so set a spending limit too.
