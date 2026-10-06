@@ -195,15 +195,13 @@ pytest -q
 
 ## Running on Android (Termux)
 
-Works fine; you just need Rust once, because `pydantic-core` has no prebuilt Android wheel:
-
 ```bash
-pkg install python git rust binutils
-export ANDROID_API_LEVEL=$(getprop ro.build.version.sdk)   # needed by the Rust build tool (maturin)
-pip install -e ".[dev]"                                     # first build takes a few minutes
-AGENT_COLLAB_MOCK=1 python -m agent_collab                  # then open http://127.0.0.1:8000 in Chrome
+cd ~/matrix-os/Agent-collab     # wherever you cloned it
+bash setup.sh                   # installs Rust + the app; first build takes 5-20 min
+bash run.sh                     # then open http://127.0.0.1:8000 in Chrome
 ```
 
-Keep Termux open while you use the app (Android may pause it in the background). Claude support
-(`.[claude]`) pulls in another Rust package, so skip it on a phone unless you need it; free
-providers like Groq or Gemini work without it.
+`bash run.sh` starts the keyless demo; `bash run.sh real` uses real models from your env vars
+(e.g. `export GROQ_API_KEY=...` first). Keep Termux open while you use the app. If you paste
+commands from a chat app, watch for curly quotes: a `>` prompt means bash is waiting for a
+closing quote; press CTRL+C and retype it.
