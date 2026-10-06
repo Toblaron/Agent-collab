@@ -136,7 +136,7 @@ files are plain JSON: commit them, hand-edit them, share them.
 | Env var | Default | Notes |
 |---|---|---|
 | `AGENT_COLLAB_MODEL` | `claude-opus-5-5` | Default Claude model (bidding and speaking) |
-| `AGENT_COLLAB_DEFAULT_PROVIDER` | `anthropic` | Provider for the starter team (`ollama`, `groq`, …) |
+| `AGENT_COLLAB_DEFAULT_PROVIDER` | `anthropic` | Provider for the starter team (`ollama`, `groq`, …), or `auto` to spread it across every provider you've set up |
 | `AGENT_COLLAB_DEFAULT_MODEL` | provider default | Model for the starter team |
 | `AGENT_COLLAB_BID_EFFORT` | `low` | Claude only. Bids are cheap yes/no-ish calls |
 | `AGENT_COLLAB_SPEAK_EFFORT` | `medium` | Claude only. Raise to `high` for harder tasks |
@@ -201,7 +201,9 @@ bash setup.sh                   # installs Rust + the app; first build takes 5-2
 bash run.sh                     # then open http://127.0.0.1:8000 in Chrome
 ```
 
-`bash run.sh` starts the keyless demo; `bash run.sh real` uses real models from your env vars
-(e.g. `export GROQ_API_KEY=...` first). Keep Termux open while you use the app. If you paste
+For real agents, put your keys in a file once: `cp keys.env.example keys.env`, then
+`nano keys.env` and paste keys after the `=` signs (links to each free signup are in the file).
+`bash run.sh` then builds a mixed starter team across every provider you have a key for;
+without keys it starts the demo (`bash run.sh demo` forces the demo). Keep Termux open while you use the app. If you paste
 commands from a chat app, watch for curly quotes: a `>` prompt means bash is waiting for a
 closing quote; press CTRL+C and retype it.

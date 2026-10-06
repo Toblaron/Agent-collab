@@ -196,3 +196,25 @@ def test_providers_api():
         assert providers["ollama"]["configured"] is True
         assert client.get("/api/providers/ollama/models").json() == {"models": ["llama3.2"]}
         assert client.get("/api/providers/nope/models").status_code == 404
+
+
+def test_auto_roster_spreads_agents_across_usable_providers(monkeypatch):
+    from agent_collab import server
+
+    for var in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_API_KEY", "HF_TOKEN",
+                "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CUSTOM_LLM_BASE_URL"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(server, "_ollama_running", lambda: False)
+    monkeypatch.setenv("AGENT_COLLAB_DEFAULT_PROVIDER", "auto")
+    monkeypatch.setenv("GROQ_API_KEY", "g")
+    monkeypatch.setenv("GEMINI_API_KEY", "m")
+    assert server.usable_providers() == ["gemini", "groq"]
+    assert [a.provider for a in server.default_roster()] == ["gemini", "groq", "gemini", "groq"]
+
+    monkeypatch.setattr(server, "_ollama_running", lambda: True)
+    assert server.usable_providers()[-1] == "ollama"
+
+    monkeypatch.delenv("GROQ_API_KEY")
+    monkeypatch.delenv("GEMINI_API_KEY")
+    monkeypatch.setattr(server, "_ollama_running", lambda: False)
+    assert {a.provider for a in server.default_roster()} == {"anthropic"}  # nothing set up: unchanged default

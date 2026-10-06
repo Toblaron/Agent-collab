@@ -8,6 +8,8 @@ import dataclasses
 import os
 from pathlib import Path
 
+import httpx
+
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
@@ -27,13 +29,48 @@ def make_backend() -> Backend:
     return RoutingBackend()
 
 
+# Preference order for AGENT_COLLAB_DEFAULT_PROVIDER=auto: capable free tiers first, local last.
+AUTO_ORDER = ("gemini", "groq", "openrouter", "mistral", "huggingface", "anthropic", "custom", "ollama")
+
+
+def _ollama_running() -> bool:
+    try:
+        return httpx.get(f"{PROVIDERS['ollama'].url}/models", timeout=1.0).status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+def usable_providers() -> list[str]:
+    """Providers that can actually answer right now: a key is set (or, for Ollama, the
+    server is up). Claude also needs its SDK installed and a key in the environment."""
+    usable = []
+    for pid in AUTO_ORDER:
+        spec = PROVIDERS[pid]
+        if pid == "ollama":
+            ok = _ollama_running()
+        elif pid == "anthropic":
+            ok = spec.configured and bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+        else:
+            ok = spec.configured
+        if ok:
+            usable.append(pid)
+    return usable
+
+
 def default_roster() -> list[Agent]:
-    """The starter team. AGENT_COLLAB_DEFAULT_PROVIDER / _MODEL move it off Claude,
-    e.g. to run the whole room for free on Ollama or Groq."""
+    """The starter team. AGENT_COLLAB_DEFAULT_PROVIDER / _MODEL move it off Claude, e.g. to
+    run the whole room for free on Ollama or Groq; `auto` spreads the four starter agents
+    across every provider you have set up, so a mixed-model team works out of the box."""
     provider = os.environ.get("AGENT_COLLAB_DEFAULT_PROVIDER", "anthropic")
-    if provider not in PROVIDERS:
-        raise SystemExit(f"AGENT_COLLAB_DEFAULT_PROVIDER={provider!r} is not one of {sorted(PROVIDERS)}")
     model = os.environ.get("AGENT_COLLAB_DEFAULT_MODEL") or None
+    if provider == "auto":
+        usable = usable_providers() or ["anthropic"]
+        return [
+            dataclasses.replace(a, provider=usable[i % len(usable)], model=None)
+            for i, a in enumerate(DEFAULT_ROSTER)
+        ]
+    if provider not in PROVIDERS:
+        raise SystemExit(f"AGENT_COLLAB_DEFAULT_PROVIDER={provider!r} is not 'auto' or one of {sorted(PROVIDERS)}")
     return [dataclasses.replace(a, provider=provider, model=model) for a in DEFAULT_ROSTER]
 
 
@@ -146,7 +183,14 @@ def main() -> None:
 
     mock = os.environ.get("AGENT_COLLAB_MOCK") == "1"
     default = os.environ.get("AGENT_COLLAB_DEFAULT_PROVIDER", "anthropic")
-    if not mock and not PROVIDERS[default].configured:
+    if not mock and default == "auto":
+        usable = usable_providers()
+        if usable:
+            team = ", ".join(f"{a.name}: {PROVIDERS[a.provider].label}" for a in default_roster())
+            print(f"Providers ready: {', '.join(PROVIDERS[p].label for p in usable)}\nStarter team: {team}", flush=True)
+        else:
+            print("warning: no provider keys found. Add one to keys.env (see keys.env.example).", flush=True)
+    elif not mock and default in PROVIDERS and not PROVIDERS[default].configured:
         hint = (
             'pip install -e ".[claude]"' if default == "anthropic"
             else f"set {PROVIDERS[default].key_env or PROVIDERS[default].base_url_env}"
