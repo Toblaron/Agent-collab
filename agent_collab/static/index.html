@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Collab</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --panel: #ffffff; --text: #18181b; --muted: #71717a;
+    --border: #e4e4e7; --human: #18181b; --accent: #2563eb; --bar: #e4e4e7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0b0b0d; --panel: #16161a; --text: #f4f4f5; --muted: #a1a1aa;
+            --border: #27272a; --human: #f4f4f5; --accent: #60a5fa; --bar: #27272a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; height: 100vh; }
+  .app { display: grid; grid-template-columns: 1fr 280px; height: 100vh; }
+  main { display: flex; flex-direction: column; min-width: 0; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex;
+           align-items: center; gap: 12px; }
+  header h1 { font-size: 16px; margin: 0; }
+  .status { font-size: 12px; color: var(--muted); margin-left: auto; }
+  .status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+                 background: var(--muted); margin-right: 6px; vertical-align: middle; }
+  .status.running .dot, .status.bidding .dot { background: #22c55e; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  #log { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { max-width: 760px; }
+  .msg .who { font-size: 12px; font-weight: 600; margin-bottom: 2px; }
+  .msg .who span { font-weight: 400; color: var(--muted); }
+  .msg .body { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--c);
+               border-radius: 8px; padding: 10px 12px; white-space: pre-wrap; word-wrap: break-word; }
+  .msg.human { align-self: flex-end; }
+  .msg.human .body { border-left: 1px solid var(--border); border-right: 3px solid var(--human); }
+  .msg.streaming .body::after { content: "▍"; animation: pulse .8s infinite; }
+  .note { font-size: 12px; color: var(--muted); text-align: center; }
+  form { display: flex; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--border); }
+  textarea { flex: 1; resize: none; height: 46px; padding: 12px; border-radius: 8px;
+             border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit; }
+  button { border: 0; border-radius: 8px; padding: 0 16px; font: inherit; cursor: pointer;
+           background: var(--accent); color: white; }
+  button.secondary { background: var(--bar); color: var(--text); }
+  aside { border-left: 1px solid var(--border); padding: 16px; overflow-y: auto; background: var(--panel); }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 12px; }
+  .agent { margin-bottom: 14px; }
+  .agent .top { display: flex; align-items: baseline; gap: 6px; }
+  .agent .name { font-weight: 600; color: var(--c); }
+  .agent .role { font-size: 12px; color: var(--muted); }
+  .agent .score { margin-left: auto; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .meter { height: 6px; background: var(--bar); border-radius: 3px; margin: 4px 0; overflow: hidden; }
+  .meter i { display: block; height: 100%; width: 0; background: var(--c); transition: width .3s; }
+  .agent .reason { font-size: 12px; color: var(--muted); min-height: 1em; }
+  .agent.winner .name::after { content: " 🎤"; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 20px; line-height: 1.6; }
+  @media (max-width: 760px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: 1fr auto; }
+    aside { border-left: 0; border-top: 1px solid var(--border); max-height: 30vh; }
+    #log, form, header { padding-left: 16px; padding-right: 16px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <main>
+    <header>
+      <h1>Agent Collab</h1>
+      <span id="room" class="note"></span>
+      <div id="status" class="status"><span class="dot"></span><span id="statusText">connecting…</span></div>
+    </header>
+    <div id="log"></div>
+    <form id="form">
+      <textarea id="input" placeholder="Give the team a task… (@Name to address someone, Enter to send)"></textarea>
+      <button type="button" id="stop" class="secondary">Stop</button>
+      <button type="submit">Send</button>
+    </form>
+  </main>
+  <aside>
+    <h2>Who wants the floor</h2>
+    <div id="agents"></div>
+    <p class="hint">After every message each agent privately bids 0–1 on how much it needs to speak.
+      The highest bid above the threshold talks; agents that just spoke are penalised.
+      When nobody bids high enough, the room goes quiet. Your message interrupts whoever is speaking.</p>
+  </aside>
+</div>
+<script>
+const roomId = (location.hash.slice(1) || "lobby").replace(/[^\w-]/g, "");
+document.getElementById("room").textContent = "#" + roomId;
+const log = document.getElementById("log");
+const agentsEl = document.getElementById("agents");
+const colors = { Human: "var(--human)" };
+const roles = {};
+const streaming = {};
+
+function atBottom() { return log.scrollHeight - log.scrollTop - log.clientHeight < 80; }
+function scroll(stick) { if (stick) log.scrollTop = log.scrollHeight; }
+
+function bubble(author, text, id) {
+  document.getElementById("empty")?.remove();
+  const stick = atBottom();
+  const el = document.createElement("div");
+  el.className = "msg" + (author === "Human" ? " human" : "");
+  el.style.setProperty("--c", colors[author] || "var(--muted)");
+  if (id) el.dataset.id = id;
+  const who = document.createElement("div");
+  who.className = "who";
+  who.style.color = colors[author] || "";
+  who.textContent = author + " ";
+  if (roles[author]) { const r = document.createElement("span"); r.textContent = roles[author]; who.append(r); }
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = text;
+  el.append(who, body);
+  log.append(el);
+  scroll(stick);
+  return el;
+}
+
+function note(text) {
+  const el = document.createElement("div");
+  el.className = "note"; el.textContent = text;
+  const stick = atBottom(); log.append(el); scroll(stick);
+  return el;
+}
+
+function renderAgents(agents) {
+  agentsEl.innerHTML = "";
+  for (const a of agents) {
+    colors[a.name] = a.color; roles[a.name] = a.role;
+    const el = document.createElement("div");
+    el.className = "agent"; el.id = "agent-" + a.name; el.style.setProperty("--c", a.color);
+    el.innerHTML = `<div class="top"><span class="name"></span><span class="role"></span><span class="score"></span></div>
+      <div class="meter"><i></i></div><div class="reason"></div>`;
+    el.querySelector(".name").textContent = a.name;
+    el.querySelector(".role").textContent = a.role;
+    agentsEl.append(el);
+  }
+}
+
+function renderBids(bids, winner) {
+  for (const el of agentsEl.children) {
+    el.classList.remove("winner");
+    el.querySelector(".meter i").style.width = "0";
+    el.querySelector(".score").textContent = "—";
+    el.querySelector(".reason").textContent = "just spoke";
+  }
+  for (const b of bids) {
+    const el = document.getElementById("agent-" + b.agent);
+    if (!el) continue;
+    el.querySelector(".meter i").style.width = Math.max(0, Math.min(1, b.score)) * 100 + "%";
+    el.querySelector(".score").textContent = b.urgency.toFixed(2) + (b.score.toFixed(2) !== b.urgency.toFixed(2) ? " → " + b.score.toFixed(2) : "");
+    el.querySelector(".reason").textContent = b.reason;
+    if (b.agent === winner) el.classList.add("winner");
+  }
+}
+
+function setStatus(state) {
+  const s = document.getElementById("status");
+  s.className = "status " + state;
+  document.getElementById("statusText").textContent =
+    { running: "conversation running", bidding: "agents deciding who speaks…", idle: "idle" }[state] || state;
+}
+
+let ws;
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/" + roomId);
+  ws.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    switch (ev.type) {
+      case "history":
+        log.innerHTML = ""; renderAgents(ev.agents);
+        ev.messages.forEach(m => bubble(m.author, m.text, m.id));
+        setStatus(ev.running ? "running" : "idle");
+        if (!ev.messages.length) note("Give the team a task to get started.").id = "empty";
+        break;
+      case "message": bubble(ev.message.author, ev.message.text, ev.message.id); break;
+      case "status": setStatus(ev.state); break;
+      case "bids":
+        renderBids(ev.bids, ev.winner);
+        if (!ev.winner) note("— the room goes quiet —");
+        break;
+      case "stream_start": {
+        const el = bubble(ev.author, "", ev.id); el.classList.add("streaming"); streaming[ev.id] = el;
+        setStatus("running"); break;
+      }
+      case "stream_delta": {
+        const el = streaming[ev.id]; if (!el) break;
+        const stick = atBottom(); el.querySelector(".body").textContent += ev.text; scroll(stick); break;
+      }
+      case "stream_end": {
+        const el = streaming[ev.message.id]; if (!el) break;
+        el.classList.remove("streaming"); el.querySelector(".body").textContent = ev.message.text;
+        if (!ev.message.text) el.remove();
+        delete streaming[ev.message.id]; break;
+      }
+    }
+  };
+  ws.onclose = () => { setStatus("disconnected — retrying"); setTimeout(connect, 1500); };
+}
+connect();
+
+const input = document.getElementById("input");
+document.getElementById("form").onsubmit = (e) => {
+  e.preventDefault();
+  const text = input.value.trim();
+  if (!text || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: "say", text }));
+  input.value = "";
+};
+input.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); document.getElementById("form").requestSubmit(); }
+});
+document.getElementById("stop").onclick = () => ws.readyState === 1 && ws.send(JSON.stringify({ type: "stop" }));
+window.addEventListener("hashchange", () => location.reload());
+</script>
+</body>
+</html>

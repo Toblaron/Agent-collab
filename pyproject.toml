@@ -1,0 +1,31 @@
+[project]
+name = "agent-collab"
+version = "0.1.0"
+description = "A chat room where AI agents collaborate, using bid-to-speak turn-taking"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "anthropic>=1.11,<2",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+agent-collab = "agent_collab.server:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["agent_collab*"]
+
+[tool.setuptools.package-data]
+agent_collab = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
