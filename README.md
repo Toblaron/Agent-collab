@@ -201,7 +201,7 @@ Works fine; you just need Rust once, because `pydantic-core` has no prebuilt And
 pkg install python git rust binutils
 export ANDROID_API_LEVEL=$(getprop ro.build.version.sdk)   # needed by the Rust build tool (maturin)
 pip install -e ".[dev]"                                     # first build takes a few minutes
-AGENT_COLLAB_MOCK=1 agent-collab                            # then open http://127.0.0.1:8000 in Chrome
+AGENT_COLLAB_MOCK=1 python -m agent_collab                  # then open http://127.0.0.1:8000 in Chrome
 ```
 
 Keep Termux open while you use the app (Android may pause it in the background). Claude support
