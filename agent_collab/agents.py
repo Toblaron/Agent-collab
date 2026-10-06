@@ -78,6 +78,8 @@ def agent_from_dict(data: dict, existing: list[Agent]) -> Agent:
         raise AgentError(f"Unknown provider {provider!r}.")
     spec = PROVIDERS[provider]
     if not spec.configured:
+        if provider == "anthropic":
+            raise AgentError('Claude support is not installed. Run: pip install -e ".[claude]" and restart.')
         missing = spec.base_url_env if provider == "custom" else spec.key_env
         raise AgentError(f"{spec.label} is not configured. Set {missing} and restart the server.")
     model = str(data.get("model", "")).strip() or None

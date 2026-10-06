@@ -570,7 +570,9 @@ async function loadProviders() {
 async function onProviderChange() {
   const p = providers.find(x => x.id === fProvider.value);
   const pn = $("fProviderNote");
-  pn.textContent = p.configured ? p.note : `not configured: set ${p.id === "custom" ? "CUSTOM_LLM_BASE_URL" : p.key_env} and restart. ${p.note}`;
+  pn.textContent = p.configured ? p.note
+    : p.id === "anthropic" ? 'not installed: pip install -e ".[claude]" and restart.'
+    : `not configured: set ${p.id === "custom" ? "CUSTOM_LLM_BASE_URL" : p.key_env} and restart. ${p.note}`;
   pn.className = "pnote" + (p.configured ? "" : " bad");
   $("submitAdd").disabled = !p.configured;
   fModel.value = p.default_model;

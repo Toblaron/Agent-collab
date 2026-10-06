@@ -16,8 +16,12 @@ import random
 import re
 from typing import AsyncIterator, Protocol
 
-import anthropic
 import httpx
+
+try:  # optional: `pip install -e ".[claude]"`
+    import anthropic
+except ImportError:  # pragma: no cover - exercised on installs without the extra
+    anthropic = None
 from pydantic import BaseModel, Field
 
 from .agents import Agent, Message, render_transcript
@@ -26,6 +30,7 @@ from .providers import PROVIDERS, ProviderSpec, auth_headers
 BID_EFFORT = os.environ.get("AGENT_COLLAB_BID_EFFORT", "low")
 SPEAK_EFFORT = os.environ.get("AGENT_COLLAB_SPEAK_EFFORT", "medium")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
+CLAUDE_MISSING = 'Claude support is not installed. Run: pip install -e ".[claude]"'
 
 
 class Bid(BaseModel):
@@ -83,17 +88,21 @@ def _clamp(bid: Bid) -> Bid:
 
 
 class ClaudeBackend:
-    def __init__(self, client: anthropic.AsyncAnthropic | None = None):
+    def __init__(self, client: "anthropic.AsyncAnthropic | None" = None):
         self._client = client
 
     @property
-    def client(self) -> anthropic.AsyncAnthropic:
+    def client(self) -> "anthropic.AsyncAnthropic":
         # Lazy so importing the app (tests, mock mode, free-only setups) never needs credentials.
         if self._client is None:
+            if anthropic is None:
+                raise ProviderError(CLAUDE_MISSING)
             self._client = anthropic.AsyncAnthropic()
         return self._client
 
     async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = "") -> Bid:
+        if anthropic is None and self._client is None:
+            return _failed_bid("(Claude not installed)")
         try:
             response = await self.client.beta.messages.parse(
                 model=agent.model_id,

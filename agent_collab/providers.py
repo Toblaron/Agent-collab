@@ -37,8 +37,10 @@ class ProviderSpec:
     @property
     def configured(self) -> bool:
         if self.id == "anthropic":
-            # The SDK also resolves `ant auth login` profiles, which env vars can't reveal.
-            return True
+            # Installed is the gate: the SDK also resolves `ant auth login` profiles, which env vars can't reveal.
+            import importlib.util
+
+            return importlib.util.find_spec("anthropic") is not None
         if self.id == "custom":
             return bool(os.environ.get("CUSTOM_LLM_BASE_URL"))
         return self.key_env is None or bool(self.api_key)

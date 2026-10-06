@@ -144,6 +144,19 @@ app = create_app()
 def main() -> None:
     import uvicorn
 
+    mock = os.environ.get("AGENT_COLLAB_MOCK") == "1"
+    default = os.environ.get("AGENT_COLLAB_DEFAULT_PROVIDER", "anthropic")
+    if not mock and not PROVIDERS[default].configured:
+        hint = (
+            'pip install -e ".[claude]"' if default == "anthropic"
+            else f"set {PROVIDERS[default].key_env or PROVIDERS[default].base_url_env}"
+        )
+        print(
+            f"warning: the starter team uses {PROVIDERS[default].label}, which isn't set up ({hint}).\n"
+            "         Try AGENT_COLLAB_MOCK=1 for a demo, or AGENT_COLLAB_DEFAULT_PROVIDER=ollama for free local models.",
+            flush=True,
+        )
+
     uvicorn.run(
         "agent_collab.server:app",
         host=os.environ.get("HOST", "127.0.0.1"),

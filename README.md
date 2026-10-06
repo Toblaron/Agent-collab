@@ -36,7 +36,7 @@ The sidebar shows every agent's live bid, adjusted score and one-line reason, so
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,claude]"           # drop ",claude" if you only use free models
 export ANTHROPIC_API_KEY=sk-ant-...      # or `ant auth login`
 agent-collab                              # http://127.0.0.1:8000
 ```
@@ -192,3 +192,18 @@ Add agents from the UI, or edit `DEFAULT_ROSTER` in `agents.py` (each `Agent` ta
 ```bash
 pytest -q
 ```
+
+## Running on Android (Termux)
+
+Works fine; you just need Rust once, because `pydantic-core` has no prebuilt Android wheel:
+
+```bash
+pkg install python git rust binutils
+export ANDROID_API_LEVEL=$(getprop ro.build.version.sdk)   # needed by the Rust build tool (maturin)
+pip install -e ".[dev]"                                     # first build takes a few minutes
+AGENT_COLLAB_MOCK=1 agent-collab                            # then open http://127.0.0.1:8000 in Chrome
+```
+
+Keep Termux open while you use the app (Android may pause it in the background). Claude support
+(`.[claude]`) pulls in another Rust package, so skip it on a phone unless you need it; free
+providers like Groq or Gemini work without it.
