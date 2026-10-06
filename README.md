@@ -87,6 +87,10 @@ How non-Claude agents work:
   one per second, so it's paced from the start); any provider that answers "429 slow down" is
   automatically slowed further, honouring `Retry-After`, then eased back. A rate-limited speaker
   gets a second try after a short pause instead of being skipped.
+- **Automatic model switching.** Each free model has its own daily quota. When one runs out (a
+  429 whose wait is hours, or a "tokens per day" limit), that agent moves to another chat model
+  from the same provider, the chat shows `Bo switched to …`, and the reply carries on. A short
+  per-minute limit ("try again in 7s") is just waited out — no switch.
 - **Failure isolation.** A rate limit, a wrong model ID or Ollama not running mutes that agent for
   the rest of the round and shows a red error line; everyone else keeps talking. Bid failures show
   up as the agent's reason in the sidebar (`(rate limited)`, `(error: can't connect)`).
@@ -226,7 +230,6 @@ Add agents from the UI, or edit `DEFAULT_ROSTER` in `agents.py` (each `Agent` ta
 
 - Separate bid model per agent (e.g. bid on a small local model, speak on a big one)
 - More tools: sandboxed code execution, fetch-a-URL
-- Automatic model fallback when a free model's daily quota runs out mid-conversation
 - Private side-channels (agent ↔ agent DMs) and a task board agents can claim items from
 - Long-room context management (compaction / rolling summary)
 

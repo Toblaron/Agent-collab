@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - exercised on installs without the extr
 from pydantic import BaseModel, Field
 
 from .agents import Agent, Message, render_transcript
-from .providers import PROVIDERS, ProviderSpec, auth_headers
+from .providers import PROVIDERS, ProviderSpec, auth_headers, candidate_models
 
 BID_EFFORT = os.environ.get("AGENT_COLLAB_BID_EFFORT", "low")
 SPEAK_EFFORT = os.environ.get("AGENT_COLLAB_SPEAK_EFFORT", "medium")
@@ -196,11 +196,13 @@ class ThinkFilter:
 
 
 class ProviderError(RuntimeError):
-    """`temporary=True`: rate-limited or busy; trying again a bit later should work."""
+    """`temporary=True`: rate-limited or busy; trying again a bit later should work.
+    `model_unavailable=True`: this model is out (quota/long limit); another model may work."""
 
-    def __init__(self, message: str, temporary: bool = False):
+    def __init__(self, message: str, temporary: bool = False, model_unavailable: bool = False):
         super().__init__(message)
         self.temporary = temporary
+        self.model_unavailable = model_unavailable
 
 
 # Known free-tier request rates (seconds between requests to one provider). Anything not listed
@@ -254,6 +256,8 @@ class OpenAICompatBackend:
         self._client = client
         self.timeout = timeout
         self._pacers: dict[str, Pacer] = {}
+        self._blocked: dict[tuple[str, str], float] = {}  # (provider, model) -> usable again at (monotonic)
+        self._model_lists: dict[str, tuple[float, list[str]]] = {}  # provider -> (fetched at, ids)
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -287,6 +291,32 @@ class OpenAICompatBackend:
         elif r.status_code < 400:
             self.pacer(provider).ok()
 
+    def _block(self, agent: Agent, r: httpx.Response) -> None:
+        wait = limit_wait(r)
+        self._blocked[(agent.provider, agent.model_id)] = asyncio.get_running_loop().time() + (wait if wait else 6 * 3600)
+
+    async def alternative_model(self, agent: Agent) -> str | None:
+        """Another chat model from the same provider that isn't known to be out of quota.
+        Each model has its own free quota, so when one runs out the agent can keep going."""
+        spec = PROVIDERS[agent.provider]
+        now = asyncio.get_running_loop().time()
+        fetched, ids = self._model_lists.get(agent.provider, (0.0, []))
+        if now - fetched > 600 or not ids:
+            try:
+                r = await self.client.get(f"{spec.url}/models", headers=auth_headers(spec), timeout=10)
+                r.raise_for_status()
+                ids = sorted(
+                    m["id"].removeprefix("models/") for m in r.json().get("data", []) if isinstance(m, dict) and "id" in m
+                )
+                self._model_lists[agent.provider] = (now, ids)
+            except (httpx.HTTPError, ValueError, KeyError):
+                return None
+        for model in candidate_models(agent.provider, spec.default_model, ids):
+            if model == agent.model_id or self._blocked.get((agent.provider, model), 0) > now:
+                continue
+            return model
+        return None
+
     def _delay(self, base: float, r: httpx.Response) -> float:
         return max(base, _retry_after(r) or 0)
 
@@ -306,7 +336,10 @@ class OpenAICompatBackend:
                     break
                 await asyncio.sleep(self._delay(delay, r))
             if r.status_code == 429:
-                return _failed_bid("(daily quota used up)" if quota_used_up(r) else "(rate limited)")
+                if quota_used_up(r):
+                    self._block(agent, r)
+                    return _failed_bid("(daily quota used up)")
+                return _failed_bid("(rate limited)")
             if r.status_code == 503:
                 return _failed_bid("(provider busy)")
             r.raise_for_status()
@@ -333,10 +366,8 @@ class OpenAICompatBackend:
                     await r.aread()
                 self._note(agent.provider, r)
                 if r.status_code == 429 and quota_used_up(r):
-                    raise ProviderError(
-                        f"{spec.label}'s free quota for {agent.model_id} is used up for today. "
-                        f"Use [edit] on {agent.name} to pick another model (each model has its own quota)."
-                    )
+                    self._block(agent, r)
+                    raise ProviderError(unavailable_reason(r, spec.label, agent.model_id) + ".", model_unavailable=True)
                 if r.status_code in self.RETRYABLE and delay is not None:
                     wait = self._delay(delay, r)  # wait and retry below
                 elif r.status_code in (429, 503):
@@ -371,16 +402,49 @@ class OpenAICompatBackend:
                     yield text
 
 
+_WAIT_RE = re.compile(
+    r"(?:retry|try again)(?: after| in)?\s+((?:\d+(?:\.\d+)?h)?(?:\d+(?:\.\d+)?m(?!s))?(?:\d+(?:\.\d+)?s)?(?:\d+(?:\.\d+)?ms)?)"
+)
+SHORT_WAIT = 60.0  # seconds: pace and retry; longer means the model is out of action for a while
+
+
+def limit_wait(r: httpx.Response) -> float | None:
+    """How long the provider says to wait, from Retry-After or the message text
+    ("Please try again in 7m12.5s", "retry in 41.2s", "try again in 450ms")."""
+    header = r.headers.get("retry-after")
+    try:
+        if header:
+            return float(header)
+    except ValueError:
+        pass
+    m = _WAIT_RE.search(r.text.lower())
+    if not m or not m.group(1):
+        return None
+    total = 0.0
+    for value, unit in re.findall(r"(\d+(?:\.\d+)?)(ms|h|m|s)", m.group(1)):
+        total += float(value) * {"h": 3600, "m": 60, "s": 1, "ms": 0.001}[unit]
+    return total
+
+
 def quota_used_up(r: httpx.Response) -> bool:
-    """A 429 that waiting a few seconds won't fix: a daily/monthly quota rather than a
-    per-minute rate limit. Per-minute limits tell you to retry in seconds; quotas don't."""
+    """A 429 that a short wait won't fix: a daily quota, or a limit that clears only in
+    minutes. Per-minute limits say "try again in 5s"; those are paced and retried instead.
+    (Don't key on words like "billing": Groq's per-minute messages link to its billing page.)"""
     if r.status_code != 429:
         return False
+    wait = limit_wait(r)
+    if wait is not None:
+        return wait > SHORT_WAIT
     text = r.text.lower()
-    retry = re.search(r"retry in ([0-9.]+)\s*s", text)
-    if retry and float(retry.group(1)) <= 120:
-        return False
-    return any(k in text for k in ("quota", "per day", "perday", "daily", "credits", "billing"))
+    return any(k in text for k in ("quota", "per day", "perday", "(tpd)", "(rpd)", "daily"))
+
+
+def unavailable_reason(r: httpx.Response, label: str, model: str) -> str:
+    wait = limit_wait(r)
+    text = r.text.lower()
+    daily = any(k in text for k in ("per day", "perday", "(tpd)", "(rpd)", "daily")) or (wait or 0) > 3600
+    when = "" if wait is None else (f" (resets in ~{wait / 3600:.0f}h)" if wait >= 3600 else f" (resets in ~{max(1, round(wait / 60))} min)")
+    return f"{label}'s {'daily' if daily else 'free'} limit for {model} is reached{when}"
 
 
 def _error_text(body: str) -> str:
@@ -416,6 +480,10 @@ class RoutingBackend:
 
     def _for(self, agent: Agent) -> Backend:
         return self.claude if agent.provider == "anthropic" else self.compat
+
+    async def alternative_model(self, agent: Agent) -> str | None:
+        finder = getattr(self._for(agent), "alternative_model", None)
+        return await finder(agent) if finder else None
 
     async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = "") -> Bid:
         return await self._for(agent).bid(agent, roster, transcript, whiteboard)

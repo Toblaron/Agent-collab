@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from .actions import MAX_WHITEBOARD_CHARS, SEARCH, Actions, extract_actions
 from .agents import GREAT_MINDS, Agent, AgentError, Message, agent_from_dict
 from .llm import Backend, Bid, ProviderError
+from .providers import PROVIDERS
 from .search import SearchError, Searcher, format_results
 
 log = logging.getLogger(__name__)
@@ -383,7 +384,14 @@ class Room:
                 log.exception("bid from %s failed", agent.name)
                 return Bid(urgency=0.0, reason=f"(error: {type(e).__name__})")
 
-        bids = await asyncio.gather(*(bid_with_deadline(a) for a in bidders))
+        bids = list(await asyncio.gather(*(bid_with_deadline(a) for a in bidders)))
+        # An agent whose model's quota just ran out moves to another model and bids again.
+        for i, (agent, bid) in enumerate(zip(bidders, bids)):
+            if bid.urgency == 0 and bid.reason == "(daily quota used up)":
+                switched = await self._switch_model(agent, f"{PROVIDERS[agent.provider].label}'s limit for {agent.model_id} is reached")
+                if switched is not None:
+                    bidders[i] = switched
+                    bids[i] = await bid_with_deadline(switched)
         scored = [ScoredBid(a, b, self._score(a, b)) for a, b in zip(bidders, bids)]
         return sorted(scored, key=lambda s: s.score, reverse=True)
 
@@ -482,6 +490,11 @@ class Room:
         try:
             return await self._speak(agent)
         except Exception as e:
+            if getattr(e, "model_unavailable", False):
+                switched = await self._switch_model(agent, str(e))
+                if switched is None:
+                    raise
+                return await self._speak(switched)
             if not getattr(e, "temporary", False):
                 raise
             wait = self.settings.speak_retry_wait
@@ -490,6 +503,19 @@ class Room:
             await asyncio.sleep(wait)
             self._emit({"type": "status", "state": "running"})
             return await self._speak(agent)
+
+    async def _switch_model(self, agent: Agent, reason: str) -> Agent | None:
+        """Move an agent whose model ran out of free quota to another model from the same
+        provider (each model has its own quota), keeping everything else about the agent."""
+        finder = getattr(self.backend, "alternative_model", None)
+        new_model = await finder(agent) if finder else None
+        current = next((a for a in self.agents if a.name == agent.name), None)
+        if not new_model or current is None:
+            return None
+        switched = dataclasses.replace(current, model=new_model)
+        self.agents = [switched if a.name == agent.name else a for a in self.agents]
+        self._roster_changed(f"{agent.name} switched to {new_model}: {reason.rstrip('.')}")
+        return switched
 
     async def _speak(self, agent: Agent) -> tuple[Actions, bool]:
         """Stream one reply. Returns (actions to apply, whether anything was said)."""

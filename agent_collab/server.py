@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 
 from .agents import DEFAULT_ROSTER, EXTRA_ROSTER, Agent, AgentError
 from .llm import Backend, MockBackend, RoutingBackend, quota_used_up
-from .providers import PROVIDERS, auth_headers, list_models
+from .providers import MODEL_HINTS, PROVIDERS, auth_headers, candidate_models, list_models, pick_model
 from .room import HUMAN, Room
 from .rooms import RoomStore, export_markdown, valid_room_id
 from .search import Searcher, make_searcher
@@ -38,46 +38,12 @@ def make_backend() -> Backend:
 # Preference order for AGENT_COLLAB_DEFAULT_PROVIDER=auto: capable free tiers first, local last.
 AUTO_ORDER = ("gemini", "groq", "openrouter", "mistral", "huggingface", "anthropic", "custom", "ollama")
 
-# When a provider's default model has disappeared from its live list (free catalogues churn),
-# pick a replacement whose id contains one of these hints, skipping non-chat models.
-MODEL_HINTS = {
-    "gemini": ("flash-lite-latest", "flash-lite", "flash-latest", "flash", "pro"),
-    "groq": ("llama-3.3", "llama", "qwen", "gemma"),
-    "openrouter": (":free",),
-    "mistral": ("small", "medium", "large"),
-    "huggingface": ("instruct", "chat"),
-    "custom": ("",),
-    "ollama": ("",),
-}
-NOT_CHAT = ("embed", "tts", "audio", "whisper", "image", "vision-only", "guard", "moderation", "live", "transcribe")
-
-
 @dataclass
 class ProviderCheck:
     id: str
     ok: bool
     model: str | None
     note: str
-
-
-def pick_model(pid: str, default: str, ids: list[str]) -> str:
-    if not ids or default in ids:
-        return default
-    chat = [i for i in ids if not any(bad in i.lower() for bad in NOT_CHAT)] or ids
-    for hint in MODEL_HINTS.get(pid, ("",)):
-        matches = [i for i in chat if hint in i.lower()]
-        if matches:
-            return matches[0]
-    return chat[0]
-
-
-def candidate_models(pid: str, default: str, ids: list[str]) -> list[str]:
-    """Models worth trying, best first: the default, then listed chat models matching the hints."""
-    chat = [i for i in ids if not any(bad in i.lower() for bad in NOT_CHAT)]
-    out = [default] if (not ids or default in ids) else []
-    for hint in MODEL_HINTS.get(pid, ("",)):
-        out += [i for i in chat if hint in i.lower() and i not in out]
-    return out or chat[:1] or [default]
 
 
 def probe_chat(spec, model: str, timeout: float = 12.0) -> tuple[int, str]:

@@ -133,3 +133,37 @@ async def list_models(spec: ProviderSpec, client: httpx.AsyncClient | None = Non
     finally:
         if owns:
             await client.aclose()
+
+
+# When a provider's default model has disappeared from its live list (free catalogues churn),
+# pick a replacement whose id contains one of these hints, skipping non-chat models.
+MODEL_HINTS = {
+    "gemini": ("flash-lite-latest", "flash-lite", "flash-latest", "flash", "pro"),
+    "groq": ("llama-3.3", "llama", "qwen", "gemma"),
+    "openrouter": (":free",),
+    "mistral": ("small", "medium", "large"),
+    "huggingface": ("instruct", "chat"),
+    "custom": ("",),
+    "ollama": ("",),
+}
+NOT_CHAT = ("embed", "tts", "audio", "whisper", "image", "vision-only", "guard", "moderation", "live", "transcribe")
+
+
+def pick_model(pid: str, default: str, ids: list[str]) -> str:
+    if not ids or default in ids:
+        return default
+    chat = [i for i in ids if not any(bad in i.lower() for bad in NOT_CHAT)] or ids
+    for hint in MODEL_HINTS.get(pid, ("",)):
+        matches = [i for i in chat if hint in i.lower()]
+        if matches:
+            return matches[0]
+    return chat[0]
+
+
+def candidate_models(pid: str, default: str, ids: list[str]) -> list[str]:
+    """Models worth trying, best first: the default, then listed chat models matching the hints."""
+    chat = [i for i in ids if not any(bad in i.lower() for bad in NOT_CHAT)]
+    out = [default] if (not ids or default in ids) else []
+    for hint in MODEL_HINTS.get(pid, ("",)):
+        out += [i for i in chat if hint in i.lower() and i not in out]
+    return out or chat[:1] or [default]

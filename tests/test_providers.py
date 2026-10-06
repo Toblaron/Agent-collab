@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 
 import httpx
@@ -420,8 +421,9 @@ def test_daily_quota_is_reported_not_retried(monkeypatch):
     async def speak():
         return "".join([t async for t in backend.speak(agent, [agent], [])])
 
-    with pytest.raises(Exception, match="used up for today.*\\[edit\\] on Gem"):
+    with pytest.raises(ProviderError, match="limit for gemini-x is reached") as exc:
         run(speak())
+    assert exc.value.model_unavailable
 
 
 def test_check_skips_models_with_used_up_quota(monkeypatch):
@@ -525,3 +527,120 @@ def test_room_on_strict_one_request_per_window_provider(monkeypatch):
     assert room.messages[1].author == "Dee" and "Bostrom" in room.messages[1].text
     assert not [e for e in events if e["type"] == "error"], [e for e in events if e["type"] == "error"]
     assert rejected["n"] == 0  # paced from the start: never even tripped the limit
+
+
+GROQ_TPM = ("Rate limit reached for model `qwen/qwen3.8-27b` in organization `org_x` service tier `on_demand` on tokens "
+            "per minute (TPM): Limit 6000, Used 5800, Requested 900. Please try again in 5.12s. Need more tokens? "
+            "Upgrade to Dev Tier today at https://console.groq.com/settings/billing")
+GROQ_TPD = ("Rate limit reached for model `qwen/qwen3.8-27b` in organization `org_x` service tier `on_demand` on tokens "
+            "per day (TPD): Limit 500000, Used 499800, Requested 900. Please try again in 7m12.5s. Need more tokens? "
+            "Upgrade to Dev Tier today at https://console.groq.com/settings/billing")
+
+
+def groq_429(msg, **headers):
+    return httpx.Response(429, headers=headers, json={"error": {"message": msg, "type": "tokens", "code": "rate_limit_exceeded"}})
+
+
+def test_wait_times_are_parsed_from_real_messages():
+    from agent_collab.llm import limit_wait, quota_used_up, unavailable_reason
+
+    assert limit_wait(groq_429(GROQ_TPM)) == pytest.approx(5.12)
+    assert limit_wait(groq_429(GROQ_TPD)) == pytest.approx(432.5)
+    assert limit_wait(groq_429("slow down, try again in 450ms")) == pytest.approx(0.45)
+    assert limit_wait(groq_429("x", **{"retry-after": "30"})) == 30
+    assert limit_wait(groq_429("Please retry in 41.2s.")) == pytest.approx(41.2)
+    # The bug: per-minute limits mention "billing" and were treated as a used-up quota.
+    assert not quota_used_up(groq_429(GROQ_TPM))
+    assert quota_used_up(groq_429(GROQ_TPD))
+    assert unavailable_reason(groq_429(GROQ_TPD), "Groq", "qwen/qwen3.8-27b") == \
+        "Groq's daily limit for qwen/qwen3.8-27b is reached (resets in ~7 min)"
+
+
+def test_alternative_model_skips_blocked_and_non_chat_models(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    listed = ["whisper-large-v3", "llama-guard-4-12b", "qwen/qwen3.8-27b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": m} for m in listed]})
+        return groq_429(GROQ_TPD)
+
+    backend = OpenAICompatBackend(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    bo = Agent("Bo", "builder", "", provider="groq", model="qwen/qwen3.8-27b")
+
+    async def go():
+        bid = await backend.bid(bo, [bo], [])   # trips the daily limit -> qwen blocked
+        alt = await backend.alternative_model(bo)
+        backend._blocked[("groq", alt)] = asyncio.get_running_loop().time() + 999
+        alt2 = await backend.alternative_model(dataclasses.replace(bo, model=alt))
+        return bid, alt, alt2
+
+    bid, alt, alt2 = run(go())
+    assert bid.reason == "(daily quota used up)"
+    assert alt == "llama-3.3-70b-versatile"          # Groq's default comes first
+    assert alt2 == "llama-3.1-8b-instant"            # never whisper/guard, never a blocked model
+
+
+def test_agent_switches_model_mid_conversation_and_still_answers(monkeypatch):
+    """The reported failure: Bo on Groq/qwen hit its daily limit. Now he moves to another
+    Groq model, the room says so, and he finishes his turn."""
+    from agent_collab.room import Room, RoomSettings
+
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    used = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "qwen/qwen3.8-27b"}, {"id": "llama-3.3-70b-versatile"}]})
+        body = json.loads(request.content)
+        used.append(body["model"])
+        if body["model"] == "qwen/qwen3.8-27b":
+            return groq_429(GROQ_TPD)
+        if body.get("stream"):
+            return httpx.Response(200, text='data: {"choices": [{"delta": {"content": "Here is the build plan."}}]}\n\ndata: [DONE]\n\n')
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"urgency": 0.1, "reason": "r"}'}}]})
+
+    bo = Agent("Bo", "builder", "", provider="groq", model="qwen/qwen3.8-27b", tools=())
+    backend = OpenAICompatBackend(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    async def go():
+        room = Room("r", [bo], backend, RoomSettings(max_agent_turns=1))
+        q = room.subscribe()
+        await room.post_human("@Bo build it")
+        await room.wait_idle()
+        return room, [q.get_nowait() for _ in range(q.qsize())]
+
+    room, events = run(go())
+    assert room.messages[-1].author == "Bo" and room.messages[-1].text == "Here is the build plan."
+    assert room.agents[0].model == "llama-3.3-70b-versatile"  # the switch sticks for later turns
+    assert room.messages[-1].meta["model"] == "llama-3.3-70b-versatile"
+    notice = next(e["text"] for e in events if e["type"] == "notice" and "switched" in e["text"])
+    assert notice.startswith("Bo switched to llama-3.3-70b-versatile: Groq's daily limit for qwen/qwen3.8-27b is reached")
+    assert not [e for e in events if e["type"] == "error"]
+    assert used == ["qwen/qwen3.8-27b", "llama-3.3-70b-versatile"]  # no retry storm against the dead model
+
+
+def test_per_minute_limit_is_paced_not_switched(monkeypatch):
+    from agent_collab.room import Room, RoomSettings
+
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return groq_429(GROQ_TPM.replace("5.12s", "0.2s"))
+        return httpx.Response(200, text='data: {"choices": [{"delta": {"content": "ok"}}]}\n\ndata: [DONE]\n\n')
+
+    bo = Agent("Bo", "builder", "", provider="groq", model="qwen/qwen3.8-27b", tools=())
+    backend = OpenAICompatBackend(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    backend.RETRY_DELAYS = (0.05, 0.05)
+
+    async def go():
+        room = Room("r", [bo], backend, RoomSettings(max_agent_turns=1))
+        await room.post_human("@Bo go")
+        await room.wait_idle()
+        return room
+
+    room = run(go())
+    assert room.agents[0].model == "qwen/qwen3.8-27b" and room.messages[-1].text == "ok"
