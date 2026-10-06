@@ -6,6 +6,8 @@ import asyncio
 import contextlib
 import dataclasses
 import os
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -13,9 +15,9 @@ import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 
-from .agents import DEFAULT_ROSTER, Agent, AgentError
+from .agents import DEFAULT_ROSTER, EXTRA_ROSTER, Agent, AgentError
 from .llm import Backend, MockBackend, RoutingBackend
-from .providers import PROVIDERS, list_models
+from .providers import PROVIDERS, auth_headers, list_models
 from .room import HUMAN, Room
 from .search import Searcher, make_searcher
 from .teams import TeamError, TeamStore
@@ -32,42 +34,100 @@ def make_backend() -> Backend:
 # Preference order for AGENT_COLLAB_DEFAULT_PROVIDER=auto: capable free tiers first, local last.
 AUTO_ORDER = ("gemini", "groq", "openrouter", "mistral", "huggingface", "anthropic", "custom", "ollama")
 
+# When a provider's default model has disappeared from its live list (free catalogues churn),
+# pick a replacement whose id contains one of these hints, skipping non-chat models.
+MODEL_HINTS = {
+    "gemini": ("flash", "pro"),
+    "groq": ("llama-3.3", "llama", "qwen", "gemma"),
+    "openrouter": (":free",),
+    "mistral": ("small", "medium", "large"),
+    "huggingface": ("instruct", "chat"),
+    "custom": ("",),
+    "ollama": ("",),
+}
+NOT_CHAT = ("embed", "tts", "audio", "whisper", "image", "vision-only", "guard", "moderation", "live", "transcribe")
 
-def _ollama_running() -> bool:
+
+@dataclass
+class ProviderCheck:
+    id: str
+    ok: bool
+    model: str | None
+    note: str
+
+
+def pick_model(pid: str, default: str, ids: list[str]) -> str:
+    if not ids or default in ids:
+        return default
+    chat = [i for i in ids if not any(bad in i.lower() for bad in NOT_CHAT)] or ids
+    for hint in MODEL_HINTS.get(pid, ("",)):
+        matches = [i for i in chat if hint in i.lower()]
+        if matches:
+            return matches[0]
+    return chat[0]
+
+
+def check_provider(pid: str) -> ProviderCheck:
+    """Is this provider usable right now? Lists its models, which proves the key works
+    (or that Ollama is running) without spending any tokens."""
+    spec = PROVIDERS[pid]
+    if pid == "anthropic":
+        if not spec.configured:
+            return ProviderCheck(pid, False, None, 'not installed (pip install -e ".[claude]")')
+        if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+            return ProviderCheck(pid, False, None, "no key")
+        return ProviderCheck(pid, True, spec.default_model, "key set (not verified)")
+    if not spec.configured:
+        return ProviderCheck(pid, False, None, "no key" if pid != "custom" else "no CUSTOM_LLM_BASE_URL")
     try:
-        return httpx.get(f"{PROVIDERS['ollama'].url}/models", timeout=1.0).status_code == 200
+        r = httpx.get(f"{spec.url}/models", headers=auth_headers(spec), timeout=8.0)
     except httpx.HTTPError:
-        return False
+        return ProviderCheck(pid, False, None, "not running" if pid == "ollama" else "unreachable")
+    if r.status_code in (401, 403) or (r.status_code == 400 and "key" in r.text.lower()):  # Gemini: 400
+        return ProviderCheck(pid, False, None, f"key rejected (HTTP {r.status_code}): check {spec.key_env} in keys.env")
+    if r.status_code >= 400:
+        return ProviderCheck(pid, False, None, f"HTTP {r.status_code}")
+    try:
+        ids = sorted(m["id"].removeprefix("models/") for m in r.json().get("data", []) if isinstance(m, dict) and "id" in m)
+    except ValueError:
+        ids = []
+    if pid == "ollama" and not ids:
+        return ProviderCheck(pid, False, None, "running, but no models pulled (ollama pull llama3.2:1b)")
+    model = pick_model(pid, spec.default_model, ids)
+    note = "ok" if model == spec.default_model else f"ok (default model unavailable, using {model})"
+    return ProviderCheck(pid, True, model, note)
+
+
+_checks: list[ProviderCheck] | None = None
+
+
+def check_providers(refresh: bool = False) -> list[ProviderCheck]:
+    global _checks
+    if _checks is None or refresh:
+        with ThreadPoolExecutor(max_workers=len(AUTO_ORDER)) as pool:
+            _checks = list(pool.map(check_provider, AUTO_ORDER))
+    return _checks
 
 
 def usable_providers() -> list[str]:
-    """Providers that can actually answer right now: a key is set (or, for Ollama, the
-    server is up). Claude also needs its SDK installed and a key in the environment."""
-    usable = []
-    for pid in AUTO_ORDER:
-        spec = PROVIDERS[pid]
-        if pid == "ollama":
-            ok = _ollama_running()
-        elif pid == "anthropic":
-            ok = spec.configured and bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
-        else:
-            ok = spec.configured
-        if ok:
-            usable.append(pid)
-    return usable
+    return [c.id for c in check_providers() if c.ok]
 
 
 def default_roster() -> list[Agent]:
     """The starter team. AGENT_COLLAB_DEFAULT_PROVIDER / _MODEL move it off Claude, e.g. to
-    run the whole room for free on Ollama or Groq; `auto` spreads the four starter agents
-    across every provider you have set up, so a mixed-model team works out of the box."""
+    run the whole room for free on Ollama or Groq. `auto` builds a mixed team: every usable
+    provider gets at least one agent (up to 8), using a model that provider actually lists."""
     provider = os.environ.get("AGENT_COLLAB_DEFAULT_PROVIDER", "anthropic")
     model = os.environ.get("AGENT_COLLAB_DEFAULT_MODEL") or None
     if provider == "auto":
-        usable = usable_providers() or ["anthropic"]
+        usable = [c for c in check_providers() if c.ok]
+        if not usable:
+            return list(DEFAULT_ROSTER)
+        candidates = [*DEFAULT_ROSTER, *EXTRA_ROSTER]
+        size = max(len(DEFAULT_ROSTER), min(len(usable), len(candidates)))
         return [
-            dataclasses.replace(a, provider=usable[i % len(usable)], model=None)
-            for i, a in enumerate(DEFAULT_ROSTER)
+            dataclasses.replace(candidates[i], provider=usable[i % len(usable)].id, model=usable[i % len(usable)].model)
+            for i in range(size)
         ]
     if provider not in PROVIDERS:
         raise SystemExit(f"AGENT_COLLAB_DEFAULT_PROVIDER={provider!r} is not 'auto' or one of {sorted(PROVIDERS)}")
@@ -184,12 +244,19 @@ def main() -> None:
     mock = os.environ.get("AGENT_COLLAB_MOCK") == "1"
     default = os.environ.get("AGENT_COLLAB_DEFAULT_PROVIDER", "anthropic")
     if not mock and default == "auto":
-        usable = usable_providers()
-        if usable:
-            team = ", ".join(f"{a.name}: {PROVIDERS[a.provider].label}" for a in default_roster())
-            print(f"Providers ready: {', '.join(PROVIDERS[p].label for p in usable)}\nStarter team: {team}", flush=True)
+        print("Checking providers…", flush=True)
+        lines = ["Provider check:"]
+        for c in check_providers():
+            unset = c.note.startswith(("no ", "not running", "not installed"))
+            mark = "OK " if c.ok else ("-- " if unset else "!! ")
+            lines.append(f"  {mark}{PROVIDERS[c.id].label:<28} {c.model + '  ' if c.ok else ''}{c.note}")
+        team = default_roster()
+        if any(c.ok for c in check_providers()):
+            lines.append("Starter team:")
+            lines += [f"  {a.name:<4} {a.role:<13} {PROVIDERS[a.provider].label} · {a.model_id}" for a in team]
         else:
-            print("warning: no provider keys found. Add one to keys.env (see keys.env.example).", flush=True)
+            lines.append("No provider is usable yet: add a key to keys.env (see keys.env.example), then rerun.")
+        print("\n".join(lines), flush=True)
     elif not mock and default in PROVIDERS and not PROVIDERS[default].configured:
         hint = (
             'pip install -e ".[claude]"' if default == "anthropic"

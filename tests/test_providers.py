@@ -198,23 +198,65 @@ def test_providers_api():
         assert client.get("/api/providers/nope/models").status_code == 404
 
 
-def test_auto_roster_spreads_agents_across_usable_providers(monkeypatch):
+def test_auto_roster_gives_every_usable_provider_an_agent(monkeypatch):
+    from agent_collab import server
+    from agent_collab.server import ProviderCheck
+
+    monkeypatch.setenv("AGENT_COLLAB_DEFAULT_PROVIDER", "auto")
+
+    def fake(ids):
+        return [ProviderCheck(p, p in ids, f"{p}-model" if p in ids else None, "") for p in server.AUTO_ORDER]
+
+    monkeypatch.setattr(server, "check_providers", lambda refresh=False: fake({"gemini", "groq"}))
+    team = server.default_roster()
+    assert [(a.name, a.provider, a.model) for a in team] == [
+        ("Ada", "gemini", "gemini-model"), ("Bo", "groq", "groq-model"),
+        ("Cy", "gemini", "gemini-model"), ("Dee", "groq", "groq-model"),
+    ]
+
+    six = {"gemini", "groq", "openrouter", "mistral", "huggingface", "ollama"}
+    monkeypatch.setattr(server, "check_providers", lambda refresh=False: fake(six))
+    team = server.default_roster()
+    assert len(team) == 6 and {a.provider for a in team} == six
+    assert [a.name for a in team][4:] == ["Eve", "Fox"]
+
+    monkeypatch.setattr(server, "check_providers", lambda refresh=False: fake(set()))
+    assert {a.provider for a in server.default_roster()} == {"anthropic"}  # nothing usable: plain default
+
+
+def test_pick_model_falls_back_to_a_listed_chat_model():
+    from agent_collab.server import pick_model
+
+    assert pick_model("groq", "llama-3.3-70b-versatile", []) == "llama-3.3-70b-versatile"  # no list: trust default
+    assert pick_model("groq", "gone", ["whisper-large-v3", "llama-guard-4", "llama-4-scout"]) == "llama-4-scout"
+    assert pick_model("openrouter", "gone:free", ["openai/gpt-x", "qwen/qwen3:free"]) == "qwen/qwen3:free"
+    assert pick_model("gemini", "gone", ["gemini-embedding-001", "gemini-3-flash"]) == "gemini-3-flash"
+
+
+def test_check_provider_reports_key_problems(monkeypatch):
     from agent_collab import server
 
-    for var in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_API_KEY", "HF_TOKEN",
-                "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CUSTOM_LLM_BASE_URL"):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(server, "_ollama_running", lambda: False)
-    monkeypatch.setenv("AGENT_COLLAB_DEFAULT_PROVIDER", "auto")
-    monkeypatch.setenv("GROQ_API_KEY", "g")
-    monkeypatch.setenv("GEMINI_API_KEY", "m")
-    assert server.usable_providers() == ["gemini", "groq"]
-    assert [a.provider for a in server.default_roster()] == ["gemini", "groq", "gemini", "groq"]
+    monkeypatch.setenv("GROQ_API_KEY", "bad")
+    monkeypatch.setattr(server.httpx, "get", lambda *a, **k: httpx.Response(401, json={}))
+    c = server.check_provider("groq")
+    assert not c.ok and "key rejected" in c.note and "GROQ_API_KEY" in c.note
 
-    monkeypatch.setattr(server, "_ollama_running", lambda: True)
-    assert server.usable_providers()[-1] == "ollama"
+    monkeypatch.setattr(server.httpx, "get", lambda *a, **k: httpx.Response(200, json={"data": [{"id": "llama-3.3-70b-versatile"}]}))
+    assert server.check_provider("groq") == server.ProviderCheck("groq", True, "llama-3.3-70b-versatile", "ok")
 
     monkeypatch.delenv("GROQ_API_KEY")
-    monkeypatch.delenv("GEMINI_API_KEY")
-    monkeypatch.setattr(server, "_ollama_running", lambda: False)
-    assert {a.provider for a in server.default_roster()} == {"anthropic"}  # nothing set up: unchanged default
+    assert server.check_provider("groq").note == "no key"
+
+    def refuse(*a, **k):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(server.httpx, "get", refuse)
+    assert server.check_provider("ollama").note == "not running"
+
+
+def test_gemini_bad_key_400_counts_as_rejected(monkeypatch):
+    from agent_collab import server
+
+    monkeypatch.setenv("GEMINI_API_KEY", "bad")
+    monkeypatch.setattr(server.httpx, "get", lambda *a, **k: httpx.Response(400, text='{"error": "API key not valid"}'))
+    assert "key rejected" in server.check_provider("gemini").note

@@ -150,3 +150,44 @@ DEFAULT_ROSTER: list[Agent] = [
         color="#16a34a",
     ),
 ]
+
+# Extra starter agents used when more providers are set up than DEFAULT_ROSTER has members
+# (AGENT_COLLAB_DEFAULT_PROVIDER=auto gives every usable provider its own agent).
+EXTRA_ROSTER: list[Agent] = [
+    Agent(
+        name="Eve",
+        role="designer",
+        persona=(
+            "You care about the people who will use the thing: flows, wording, what feels confusing. "
+            "You sketch quick alternatives and ask who it's for."
+        ),
+        color="#d97706",
+    ),
+    Agent(
+        name="Fox",
+        role="tester",
+        persona=(
+            "You try to break things: weird inputs, failure modes, what happens at 3am. "
+            "You turn vague worries into concrete test cases."
+        ),
+        color="#db2777",
+    ),
+    Agent(
+        name="Gus",
+        role="product lead",
+        persona=(
+            "You keep the team pointed at the goal: scope, priorities, what to cut. "
+            "You make decisions when the team is going in circles, and say why."
+        ),
+        color="#2563eb",
+    ),
+    Agent(
+        name="Hal",
+        role="writer",
+        persona=(
+            "You turn the team's work into clear words: summaries, docs, announcements. "
+            "You notice when something can't be explained simply and say so."
+        ),
+        color="#64748b",
+    ),
+]
