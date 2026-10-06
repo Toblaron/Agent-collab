@@ -644,3 +644,32 @@ def test_per_minute_limit_is_paced_not_switched(monkeypatch):
 
     room = run(go())
     assert room.agents[0].model == "qwen/qwen3.8-27b" and room.messages[-1].text == "ok"
+
+
+def test_openai_reasoning_models_get_their_own_parameters():
+    from agent_collab.providers import adapt_body
+
+    body = {"model": "gpt-5-mini", "messages": [], "temperature": 0.7, "max_tokens": 2048, "stream": True}
+    out = adapt_body("openai", body)
+    assert "max_tokens" not in out and "temperature" not in out
+    assert out["reasoning_effort"] == "low"
+    assert out["max_completion_tokens"] > 2048  # room for hidden reasoning plus the reply
+    assert body["max_tokens"] == 2048  # caller's dict untouched
+
+    classic = adapt_body("openai", {"model": "gpt-4.1-mini", "temperature": 0.2, "max_tokens": 5})
+    assert classic == {"model": "gpt-4.1-mini", "temperature": 0.2, "max_completion_tokens": 5}
+    # gpt-oss on Groq is a normal OpenAI-compatible chat model: body passes through as-is
+    groq = {"model": "openai/gpt-oss-120b", "temperature": 0.2, "max_tokens": 5}
+    assert adapt_body("groq", groq) is groq
+
+
+def test_openai_model_list_skips_non_chat_models():
+    from agent_collab.providers import candidate_models, pick_model
+
+    ids = ["dall-e-3", "gpt-4o-mini", "gpt-4o-mini-search-preview", "gpt-4o-realtime-preview",
+           "gpt-5-mini", "gpt-image-1", "omni-moderation-latest", "text-embedding-3-small", "whisper-1"]
+    assert pick_model("openai", "gpt-9-mini", ids) == "gpt-5-mini"
+    assert candidate_models("openai", "gpt-5-mini", ids)[:2] == ["gpt-5-mini", "gpt-4o-mini"]
+    # Groq also hosts OpenAI's free open-weight models; they're a fallback when Llama's quota runs out
+    assert "openai/gpt-oss-120b" in candidate_models("groq", "llama-3.3-70b-versatile",
+                                                    ["llama-3.3-70b-versatile", "openai/gpt-oss-120b"])

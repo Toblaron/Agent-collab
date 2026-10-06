@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 
 from .agents import DEFAULT_ROSTER, EXTRA_ROSTER, Agent, AgentError
 from .llm import Backend, MockBackend, RoutingBackend, quota_used_up
-from .providers import MODEL_HINTS, PROVIDERS, auth_headers, candidate_models, list_models, pick_model
+from .providers import MODEL_HINTS, PROVIDERS, adapt_body, auth_headers, candidate_models, list_models, pick_model
 from .room import HUMAN, Room
 from .rooms import RoomStore, export_markdown, valid_room_id
 from .search import Searcher, make_searcher
@@ -36,7 +36,7 @@ def make_backend() -> Backend:
 
 
 # Preference order for AGENT_COLLAB_DEFAULT_PROVIDER=auto: capable free tiers first, local last.
-AUTO_ORDER = ("gemini", "groq", "openrouter", "mistral", "huggingface", "anthropic", "custom", "ollama")
+AUTO_ORDER = ("gemini", "groq", "openrouter", "mistral", "huggingface", "openai", "anthropic", "custom", "ollama")
 
 @dataclass
 class ProviderCheck:
@@ -53,7 +53,7 @@ def probe_chat(spec, model: str, timeout: float = 12.0) -> tuple[int, str]:
         r = httpx.post(
             f"{spec.url}/chat/completions",
             headers=auth_headers(spec),
-            json={"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "max_tokens": 5},
+            json=adapt_body(spec.id, {"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "max_tokens": 5}),
             timeout=timeout,
         )
     except httpx.HTTPError:

@@ -25,7 +25,7 @@ except ImportError:  # pragma: no cover - exercised on installs without the extr
 from pydantic import BaseModel, Field
 
 from .agents import Agent, Message, render_transcript
-from .providers import PROVIDERS, ProviderSpec, auth_headers, candidate_models
+from .providers import PROVIDERS, ProviderSpec, adapt_body, auth_headers, candidate_models
 
 BID_EFFORT = os.environ.get("AGENT_COLLAB_BID_EFFORT", "low")
 SPEAK_EFFORT = os.environ.get("AGENT_COLLAB_SPEAK_EFFORT", "medium")
@@ -282,7 +282,7 @@ class OpenAICompatBackend:
             ],
             **extra,
         }
-        return spec, body
+        return spec, adapt_body(agent.provider, body)
 
     def _note(self, provider: str, r: httpx.Response) -> None:
         """Feed every response into the provider's pacer."""

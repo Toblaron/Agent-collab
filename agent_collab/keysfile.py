@@ -13,13 +13,14 @@ from pathlib import Path
 
 KNOWN = (
     "GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_API_KEY", "HF_TOKEN",
-    "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "BRAVE_API_KEY", "SEARXNG_URL",
+    "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "BRAVE_API_KEY", "SEARXNG_URL",
     "CUSTOM_LLM_BASE_URL", "CUSTOM_LLM_API_KEY", "CUSTOM_LLM_MODEL", "OLLAMA_BASE_URL",
     "AGENT_COLLAB_DEFAULT_PROVIDER", "AGENT_COLLAB_DEFAULT_MODEL", "AGENT_COLLAB_SEARCH",
 )
 # Expected prefixes, used only to warn ("this looks like a Groq key on the Gemini line").
 PREFIXES = {"GROQ_API_KEY": ("gsk_",), "OPENROUTER_API_KEY": ("sk-or-",), "HF_TOKEN": ("hf_",),
-            "ANTHROPIC_API_KEY": ("sk-ant-",), "GEMINI_API_KEY": ("AIza", "AQ."), "TAVILY_API_KEY": ("tvly-",)}
+            "ANTHROPIC_API_KEY": ("sk-ant-",), "GEMINI_API_KEY": ("AIza", "AQ."), "TAVILY_API_KEY": ("tvly-",),
+            "OPENAI_API_KEY": ("sk-",)}  # last: sk-ant-/sk-or- above must win the "looks like a … key" lookup
 INVISIBLE = re.compile(r"[​-‏  ﻿ \r]")
 
 

@@ -88,6 +88,12 @@ PROVIDERS: dict[str, ProviderSpec] = {
             "mistral-small-latest", "Free experiment tier. Key: console.mistral.ai",
         ),
         ProviderSpec(
+            "openai", "OpenAI", "https://api.openai.com/v1", "OPENAI_API_KEY",
+            "gpt-5-mini",
+            "Paid API. Free daily tokens if you opt in to data sharing (platform.openai.com → "
+            "Settings → Data controls). For free OpenAI models with no key, use gpt-oss on Groq/OpenRouter.",
+        ),
+        ProviderSpec(
             "custom", "Custom (OpenAI-compatible)", "", "CUSTOM_LLM_API_KEY",
             os.environ.get("CUSTOM_LLM_MODEL", "default"),
             "Any OpenAI-compatible server (LM Studio, vLLM, llama.cpp…). Set CUSTOM_LLM_BASE_URL.",
@@ -139,14 +145,16 @@ async def list_models(spec: ProviderSpec, client: httpx.AsyncClient | None = Non
 # pick a replacement whose id contains one of these hints, skipping non-chat models.
 MODEL_HINTS = {
     "gemini": ("flash-lite-latest", "flash-lite", "flash-latest", "flash", "pro"),
-    "groq": ("llama-3.3", "llama", "qwen", "gemma"),
+    "groq": ("llama-3.3", "gpt-oss-120b", "llama", "gpt-oss", "qwen", "gemma"),
+    "openai": ("gpt-5-mini", "gpt-5.1-mini", "gpt-4.1-mini", "gpt-4o-mini", "mini", "gpt-5", "gpt-4.1"),
     "openrouter": (":free",),
     "mistral": ("small", "medium", "large"),
     "huggingface": ("instruct", "chat"),
     "custom": ("",),
     "ollama": ("",),
 }
-NOT_CHAT = ("embed", "tts", "audio", "whisper", "image", "vision-only", "guard", "moderation", "live", "transcribe")
+NOT_CHAT = ("embed", "tts", "audio", "whisper", "image", "vision-only", "guard", "moderation", "live", "transcribe",
+            "realtime", "dall-e", "davinci", "babbage", "sora", "search", "computer-use", "codex", "deep-research")
 
 
 def pick_model(pid: str, default: str, ids: list[str]) -> str:
@@ -167,3 +175,25 @@ def candidate_models(pid: str, default: str, ids: list[str]) -> list[str]:
     for hint in MODEL_HINTS.get(pid, ("",)):
         out += [i for i in chat if hint in i.lower() and i not in out]
     return out or chat[:1] or [default]
+
+
+def is_reasoning_openai(model: str) -> bool:
+    """OpenAI's reasoning models (gpt-5*, o1/o3/o4…) take different parameters than classic chat models."""
+    m = model.lower().removeprefix("openai/")
+    return m.startswith("gpt-5") or (len(m) > 1 and m[0] == "o" and m[1].isdigit())
+
+
+def adapt_body(pid: str, body: dict) -> dict:
+    """Provider quirks for an OpenAI-style chat body. OpenAI's own API wants `max_completion_tokens`,
+    and its reasoning models reject a custom temperature and spend hidden tokens thinking."""
+    if pid != "openai":
+        return body
+    body = dict(body)
+    if "max_tokens" in body:
+        body["max_completion_tokens"] = body.pop("max_tokens")
+    if is_reasoning_openai(body.get("model", "")):
+        body.pop("temperature", None)
+        body["reasoning_effort"] = "low"
+        # Reasoning tokens count against the limit; leave room for the visible answer too.
+        body["max_completion_tokens"] = max(body.get("max_completion_tokens", 0), 2048) + 2048
+    return body

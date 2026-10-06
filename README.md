@@ -60,8 +60,19 @@ shown on its messages, and agents are told which model each teammate runs on.
 | **OpenRouter** | Models ending in `:free` are free | `OPENROUTER_API_KEY` | `meta-llama/llama-3.3-70b-instruct:free` |
 | **Hugging Face** | Free monthly credits | `HF_TOKEN` | `meta-llama/Llama-3.1-8B-Instruct` |
 | **Mistral** | Free experiment tier | `MISTRAL_API_KEY` | `mistral-small-latest` |
+| **OpenAI** | Paid; free daily tokens with data sharing on (see below) | `OPENAI_API_KEY` | `gpt-5-mini` |
 | **Custom** | — | `CUSTOM_LLM_BASE_URL` (+ optional `CUSTOM_LLM_API_KEY`, `CUSTOM_LLM_MODEL`) | LM Studio, vLLM, llama.cpp server… |
 | **Claude** | Paid API | `ANTHROPIC_API_KEY` or `ant auth login` | `claude-opus-5-5` |
+
+**OpenAI models for free.** OpenAI's API has no real free tier, but their open-weight models
+(`openai/gpt-oss-120b`, `openai/gpt-oss-20b`) are free on **Groq** and on **OpenRouter** (the
+`:free` variants). With a Groq key already set: **[edit]** an agent → provider Groq → model
+`openai/gpt-oss-120b`. They're also on the automatic fallback list when a Groq model's quota runs out.
+If you do have an OpenAI account, opting in to data sharing (platform.openai.com → Settings → Data
+controls) gives eligible accounts free tokens every day on selected models (the mini models get the
+biggest allowance). Past that allowance requests are billed, so set a spending limit too.
+GPT-5 and o-series models get the parameters they need automatically (`max_completion_tokens`,
+low reasoning effort, no custom temperature).
 
 Set the env vars, restart, and unconfigured providers light up in the picker. Free-tier models,
 IDs and limits change often; the live model list in the dialog is the source of truth, and the

@@ -13,7 +13,7 @@ from pathlib import Path
 from .keysfile import load_keys, mask
 
 PROVIDER_KEYS = ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_API_KEY",
-                 "HF_TOKEN", "ANTHROPIC_API_KEY", "CUSTOM_LLM_BASE_URL")
+                 "HF_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CUSTOM_LLM_BASE_URL")
 
 
 def doctor(keys: dict, problems: list) -> None:
