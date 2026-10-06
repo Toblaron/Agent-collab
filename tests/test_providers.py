@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agent_collab.agents import Agent, AgentError, Message, agent_from_dict
-from agent_collab.llm import Bid, MockBackend, OpenAICompatBackend, RoutingBackend, ThinkFilter, parse_bid
+from agent_collab.llm import Bid, MockBackend, OpenAICompatBackend, ProviderError, RoutingBackend, ThinkFilter, parse_bid
 from agent_collab.room import Room, RoomSettings
 from agent_collab.server import create_app
 
@@ -355,8 +355,9 @@ def test_compat_backend_retries_busy_provider(monkeypatch):
 
     busy = make(lambda r: httpx.Response(503, json={"error": {"message": "high demand"}}))
     assert run(busy.bid(GROQ_AGENT, [GROQ_AGENT], [])).reason == "(provider busy)"
-    with pytest.raises(Exception, match="503: high demand"):
+    with pytest.raises(ProviderError, match="overloaded") as exc:
         run(speak(busy))
+    assert exc.value.temporary
 
 
 def test_provider_check_never_hangs_startup(monkeypatch):
@@ -438,3 +439,89 @@ def test_check_skips_models_with_used_up_quota(monkeypatch):
     monkeypatch.setattr(server.httpx, "post", post)
     c = server.check_provider("gemini")
     assert (c.ok, c.model) == (True, "gemini-flash-latest") and "quota used up" in c.note
+
+
+def test_pacer_spaces_requests_and_adapts():
+    from agent_collab.llm import Pacer
+
+    async def go():
+        p = Pacer(base=0.05)
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        for _ in range(4):
+            await p.wait()
+        spaced = loop.time() - start
+        p.slow_down()
+        slowed = p.interval
+        for _ in range(10):
+            p.ok()
+        return spaced, slowed, p.interval
+
+    spaced, slowed, recovered = run(go())
+    assert spaced >= 0.15  # 4 requests, 3 gaps of 0.05s
+    assert slowed == 1.0   # a 429 pushes the gap to at least 1s
+    assert 0.05 <= recovered < 0.2  # and successes ease it back toward the provider's rate
+
+
+def test_retry_after_header_is_respected(monkeypatch):
+    monkeypatch.setenv("MISTRAL_API_KEY", "k")
+    times = []
+
+    def handler(request):
+        times.append(asyncio.get_event_loop().time())
+        if len(times) == 1:
+            return httpx.Response(429, headers={"retry-after": "0.3"}, json={"message": "Rate limit exceeded"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"urgency": 0.4, "reason": "r"}'}}]})
+
+    agent = Agent("Dee", "researcher", "", provider="mistral")
+    backend = OpenAICompatBackend(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    backend.RETRY_DELAYS = (0.01, 0.01)
+    assert run(backend.bid(agent, [agent], [])).urgency == 0.4
+    assert times[1] - times[0] >= 0.29  # waited what the provider asked, not just our short delay
+
+
+def test_mistral_is_paced_by_default():
+    backend = OpenAICompatBackend()
+    assert backend.pacer("mistral").interval == 1.1 and backend.pacer("groq").interval == 0
+
+
+def test_room_on_strict_one_request_per_window_provider(monkeypatch):
+    """Reproduces the real failure: Mistral's free tier rejects requests that come too close
+    together, and Dee (on Mistral) was asked to open the debate."""
+    from agent_collab import llm
+    from agent_collab.room import Room, RoomSettings
+
+    window = 0.2
+    monkeypatch.setitem(llm.BASE_INTERVALS, "mistral", window + 0.05)
+    monkeypatch.setenv("MISTRAL_API_KEY", "k")
+    last = {"t": -10.0}
+    rejected = {"n": 0}
+
+    def strict(request):
+        now = asyncio.get_event_loop().time()
+        too_soon = now - last["t"] < window
+        last["t"] = now
+        if too_soon:
+            rejected["n"] += 1
+            return httpx.Response(429, json={"object": "error", "message": "Rate limit exceeded", "code": "1300"})
+        body = json.loads(request.content)
+        if body.get("stream"):
+            return httpx.Response(200, text='data: {"choices": [{"delta": {"content": "Bostrom says..."}}]}\n\ndata: [DONE]\n\n')
+        return httpx.Response(200, json={"choices": [{"message": {"content": '{"urgency": 0.2, "reason": "r"}'}}]})
+
+    dee = Agent("Dee", "researcher", "", provider="mistral", tools=())
+    cy = Agent("Cy", "critic", "", provider="mistral", tools=())
+    backend = OpenAICompatBackend(httpx.AsyncClient(transport=httpx.MockTransport(strict)))
+    backend.RETRY_DELAYS = (0.3, 0.6)
+
+    async def go():
+        room = Room("sim", [dee, cy], backend, RoomSettings(max_agent_turns=3, speak_retry_wait=0.3))
+        q = room.subscribe()
+        await room.post_human("Topic: are we in a simulation? @Dee open.")
+        await room.wait_idle()
+        return room, [q.get_nowait() for _ in range(q.qsize())]
+
+    room, events = run(go())
+    assert room.messages[1].author == "Dee" and "Bostrom" in room.messages[1].text
+    assert not [e for e in events if e["type"] == "error"], [e for e in events if e["type"] == "error"]
+    assert rejected["n"] == 0  # paced from the start: never even tripped the limit

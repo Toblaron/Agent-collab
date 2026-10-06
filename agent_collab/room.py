@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 from .actions import MAX_WHITEBOARD_CHARS, SEARCH, Actions, extract_actions
 from .agents import Agent, AgentError, Message, agent_from_dict
-from .llm import Backend, Bid
+from .llm import Backend, Bid, ProviderError
 from .search import SearchError, Searcher, format_results
 
 log = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ class RoomSettings:
     dominance_penalty: float = 0.12  # per recent message by the same agent
     bid_timeout: float = 15.0  # seconds; a slow provider sits the round out instead of stalling everyone
     throttle_waits: tuple[float, ...] = (15.0, 30.0)  # when *every* bid failed (rate limits), wait and retry
+    speak_retry_wait: float = 10.0  # a rate-limited speaker gets one more try after this pause
 
 
 @dataclass
@@ -377,12 +378,15 @@ class Room:
                 if winner is None:
                     break  # natural silence: nobody has anything worth adding
                 try:
-                    actions, said = await self._speak(winner.agent)
+                    actions, said = await self._speak_with_retry(winner.agent)
                 except asyncio.CancelledError:
                     raise
                 except Exception as e:  # provider down, bad model ID, rate limit...
                     sitting_out.add(winner.agent.name)
-                    self._emit({"type": "error", "agent": winner.agent.name, "text": f"{type(e).__name__}: {e}"[:300]})
+                    text = str(e) if getattr(e, "temporary", False) or isinstance(e, ProviderError) else f"{type(e).__name__}: {e}"
+                    if getattr(e, "temporary", False):
+                        text += " Sitting out this round; they'll be back."
+                    self._emit({"type": "error", "agent": winner.agent.name, "text": text[:300]})
                     continue
                 if not said:
                     # An empty reply would leave the room unchanged and the same agent could win
@@ -424,6 +428,21 @@ class Room:
             if match:
                 hits.append((match.start(), agent))
         return min(hits, key=lambda h: h[0])[1] if hits else None
+
+    async def _speak_with_retry(self, agent: Agent) -> tuple[Actions, bool]:
+        """Rate limits on free tiers usually clear within seconds: give the speaker one more try
+        before benching them (the human may have asked for exactly this agent)."""
+        try:
+            return await self._speak(agent)
+        except Exception as e:
+            if not getattr(e, "temporary", False):
+                raise
+            wait = self.settings.speak_retry_wait
+            self._emit({"type": "notice", "text": f"{agent.name}'s provider is rate-limited; trying again in {wait:.0f}s"})
+            self._emit({"type": "status", "state": "waiting"})
+            await asyncio.sleep(wait)
+            self._emit({"type": "status", "state": "running"})
+            return await self._speak(agent)
 
     async def _speak(self, agent: Agent) -> tuple[Actions, bool]:
         """Stream one reply. Returns (actions to apply, whether anything was said)."""

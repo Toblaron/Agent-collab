@@ -343,3 +343,52 @@ def test_agents_are_not_told_about_search_when_it_is_off():
     run(go(S()))
     assert "[[search:" not in seen[0] and "```whiteboard" in seen[0]
     assert "[[search:" in seen[1]
+
+
+def test_rate_limited_speaker_gets_a_second_try():
+    from agent_collab.llm import ProviderError
+
+    class Flaky(Scripted):
+        tries = 0
+
+        async def speak(self, agent, roster, transcript, whiteboard=""):
+            Flaky.tries += 1
+            if Flaky.tries == 1:
+                raise ProviderError("Mistral is rate-limiting requests right now", temporary=True)
+            yield "here's my opening"
+
+    async def go():
+        room = Room("r", [A, B], Flaky(), RoomSettings(max_agent_turns=1, speak_retry_wait=0.01))
+        q = room.subscribe()
+        await room.post_human("@A open the debate")
+        await room.wait_idle()
+        return room, [q.get_nowait() for _ in range(q.qsize())]
+
+    room, events = run(go())
+    assert room.messages[-1].author == "A" and room.messages[-1].text == "here's my opening"
+    assert any(e["type"] == "notice" and "trying again" in e["text"] for e in events)
+    assert not any(e["type"] == "error" for e in events)
+
+
+def test_permanent_speak_error_is_not_retried():
+    from agent_collab.llm import ProviderError
+
+    class Broken(Scripted):
+        tries = 0
+
+        async def speak(self, agent, roster, transcript, whiteboard=""):
+            Broken.tries += 1
+            raise ProviderError("Mistral returned 404: model not found")
+            yield
+
+    async def go():
+        room = Room("r", [A], Broken(), RoomSettings(max_agent_turns=1, speak_retry_wait=5))
+        q = room.subscribe()
+        await room.post_human("@A go")
+        await room.wait_idle()
+        return [q.get_nowait() for _ in range(q.qsize())]
+
+    events = run(go())
+    assert Broken.tries == 1
+    err = next(e for e in events if e["type"] == "error")
+    assert err["text"] == "Mistral returned 404: model not found"  # no "ProviderError:" noise

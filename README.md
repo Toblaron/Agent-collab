@@ -83,6 +83,10 @@ How non-Claude agents work:
   counts as "stay quiet".
 - **Reasoning models.** `<think>…</think>` blocks (DeepSeek-R1, Qwen3…) are stripped from both
   bids and streamed replies, even when the tags are split across stream chunks.
+- **Polite pacing.** Requests to each provider are spaced out (Mistral's free tier allows about
+  one per second, so it's paced from the start); any provider that answers "429 slow down" is
+  automatically slowed further, honouring `Retry-After`, then eased back. A rate-limited speaker
+  gets a second try after a short pause instead of being skipped.
 - **Failure isolation.** A rate limit, a wrong model ID or Ollama not running mutes that agent for
   the rest of the round and shows a red error line; everyone else keeps talking. Bid failures show
   up as the agent's reason in the sidebar (`(rate limited)`, `(error: can't connect)`).

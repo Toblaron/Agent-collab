@@ -196,23 +196,75 @@ class ThinkFilter:
 
 
 class ProviderError(RuntimeError):
-    pass
+    """`temporary=True`: rate-limited or busy; trying again a bit later should work."""
+
+    def __init__(self, message: str, temporary: bool = False):
+        super().__init__(message)
+        self.temporary = temporary
+
+
+# Known free-tier request rates (seconds between requests to one provider). Anything not listed
+# starts unpaced; every provider slows down automatically when it answers 429.
+BASE_INTERVALS = {"mistral": 1.1}
+MAX_INTERVAL = 10.0
+MAX_RETRY_AFTER = 20.0
+
+
+class Pacer:
+    """Spaces out requests to one provider. On 429 the gap doubles (up to MAX_INTERVAL);
+    each success eases it back toward the provider's normal rate."""
+
+    def __init__(self, base: float = 0.0):
+        self.base = base
+        self.interval = base
+        self._next = 0.0
+        self._lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            delay = self._next - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._next = loop.time() + self.interval
+
+    def slow_down(self, retry_after: float | None = None) -> None:
+        self.interval = min(MAX_INTERVAL, max(self.interval * 2, 1.0, retry_after or 0))
+        if retry_after:
+            self._next = max(self._next, asyncio.get_running_loop().time() + retry_after)
+
+    def ok(self) -> None:
+        self.interval = max(self.base, self.interval * 0.8)
+
+
+def _retry_after(r: httpx.Response) -> float | None:
+    value = r.headers.get("retry-after")
+    try:
+        return min(MAX_RETRY_AFTER, float(value)) if value else None
+    except ValueError:
+        return None
 
 
 class OpenAICompatBackend:
     # Free tiers often answer "busy" (503) or "slow down" (429) for a few seconds; wait and retry.
     RETRYABLE = frozenset({429, 500, 502, 503, 504})
-    RETRY_DELAYS = (1.5, 4.0)
+    RETRY_DELAYS = (2.0, 5.0)
 
     def __init__(self, client: httpx.AsyncClient | None = None, timeout: float = 120.0):
         self._client = client
         self.timeout = timeout
+        self._pacers: dict[str, Pacer] = {}
 
     @property
     def client(self) -> httpx.AsyncClient:
         if self._client is None:
             self._client = httpx.AsyncClient(timeout=self.timeout)
         return self._client
+
+    def pacer(self, provider: str) -> Pacer:
+        if provider not in self._pacers:
+            self._pacers[provider] = Pacer(BASE_INTERVALS.get(provider, 0.0))
+        return self._pacers[provider]
 
     def _request(self, agent: Agent, roster: list[Agent], user: str, **extra) -> tuple[ProviderSpec, dict]:
         spec = PROVIDERS[agent.provider]
@@ -228,7 +280,18 @@ class OpenAICompatBackend:
         }
         return spec, body
 
+    def _note(self, provider: str, r: httpx.Response) -> None:
+        """Feed every response into the provider's pacer."""
+        if r.status_code == 429 and not quota_used_up(r):
+            self.pacer(provider).slow_down(_retry_after(r))
+        elif r.status_code < 400:
+            self.pacer(provider).ok()
+
+    def _delay(self, base: float, r: httpx.Response) -> float:
+        return max(base, _retry_after(r) or 0)
+
     async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = "") -> Bid:
+        pacer = self.pacer(agent.provider)
         try:
             spec, body = self._request(
                 agent, roster,
@@ -236,10 +299,12 @@ class OpenAICompatBackend:
                 temperature=0.2, max_tokens=1024,  # roomy enough for models that think out loud first
             )
             for delay in (*self.RETRY_DELAYS[:1], None):  # bids are cheap: retry once, the room has a deadline
+                await pacer.wait()
                 r = await self.client.post(f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec))
+                self._note(agent.provider, r)
                 if r.status_code not in self.RETRYABLE or delay is None or quota_used_up(r):
                     break
-                await asyncio.sleep(delay)
+                await asyncio.sleep(self._delay(delay, r))
             if r.status_code == 429:
                 return _failed_bid("(daily quota used up)" if quota_used_up(r) else "(rate limited)")
             if r.status_code == 503:
@@ -257,27 +322,33 @@ class OpenAICompatBackend:
             agent, roster, _prompt(transcript, SPEAK_INSTRUCTIONS.format(name=agent.name), whiteboard),
             temperature=0.7, max_tokens=2048, stream=True,
         )
+        pacer = self.pacer(agent.provider)
         think = ThinkFilter()
         for delay in (*self.RETRY_DELAYS, None):
+            await pacer.wait()
             async with self.client.stream(
                 "POST", f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec)
             ) as r:
                 if r.status_code >= 400:
                     await r.aread()
+                self._note(agent.provider, r)
                 if r.status_code == 429 and quota_used_up(r):
                     raise ProviderError(
                         f"{spec.label}'s free quota for {agent.model_id} is used up for today. "
                         f"Use [edit] on {agent.name} to pick another model (each model has its own quota)."
                     )
                 if r.status_code in self.RETRYABLE and delay is not None:
-                    pass  # wait and retry below
+                    wait = self._delay(delay, r)  # wait and retry below
+                elif r.status_code in (429, 503):
+                    what = "is rate-limiting requests" if r.status_code == 429 else "is overloaded"
+                    raise ProviderError(f"{spec.label} {what} right now (free tiers allow only a few requests).", temporary=True)
                 elif r.status_code >= 400:
                     raise ProviderError(f"{spec.label} returned {r.status_code}: {_error_text(r.text)}")
                 else:
                     async for chunk in self._stream_text(r, think):
                         yield chunk
                     break
-            await asyncio.sleep(delay)
+            await asyncio.sleep(wait)
         tail = think.flush()
         if tail:
             yield tail
