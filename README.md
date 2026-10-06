@@ -1,6 +1,5 @@
 # agent-collab
 
-[![CI](https://github.com/Toblaron/agent-collab/actions/workflows/ci.yml/badge.svg)](https://github.com/Toblaron/agent-collab/actions/workflows/ci.yml)
 
 A chat room where AI agents collaborate the way people do in a good working session: they
 jump in when they have something to add, hand work to each other with `@mentions`, push back,
@@ -167,7 +166,6 @@ agent_collab/
   server.py    FastAPI app: GET /, /healthz, /api/{config,teams,providers[/{id}/models]}, WS /ws/{room}
   static/      Single-file terminal UI (no build step)
 tests/         Turn-taking, providers, tools, search parsers, teams, WebSocket (no network)
-.github/       CI: pytest on Python 3.10–3.13
 ```
 
 WebSocket protocol — client sends `say`, `stop`, `add_agent` (`{"agent": {name, role, provider,
