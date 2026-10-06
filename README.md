@@ -204,6 +204,8 @@ bash run.sh                     # then open http://127.0.0.1:8000 in Chrome
 For real agents, put your keys in a file once: `cp keys.env.example keys.env`, then
 `nano keys.env` and paste keys after the `=` signs (links to each free signup are in the file).
 `bash run.sh` then builds a mixed starter team across every provider you have a key for;
-without keys it starts the demo (`bash run.sh demo` forces the demo). Keep Termux open while you use the app. If you paste
+without keys it starts the demo (`bash run.sh demo` forces the demo).
+Something not working? `bash run.sh doctor` checks your keys (masked, safe to share) and
+tests every provider without spending tokens. Keep Termux open while you use the app. If you paste
 commands from a chat app, watch for curly quotes: a `>` prompt means bash is waiting for a
 closing quote; press CTRL+C and retype it.

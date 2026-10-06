@@ -260,3 +260,38 @@ def test_gemini_bad_key_400_counts_as_rejected(monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", "bad")
     monkeypatch.setattr(server.httpx, "get", lambda *a, **k: httpx.Response(400, text='{"error": "API key not valid"}'))
     assert "key rejected" in server.check_provider("gemini").note
+
+
+def test_keys_env_loader_forgives_paste_mess(tmp_path, monkeypatch):
+    from agent_collab.keysfile import load_keys, mask
+
+    for k in ("GROQ_API_KEY", "GEMINI_API_KEY", "HF_TOKEN", "MISTRAL_API_KEY", "OPENROUTER_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    f = tmp_path / "keys.env"
+    f.write_text(
+        "# comment\r\n"
+        "GROQ_API_KEY= gsk_abc123def456\r\n"           # space after = (breaks `source`)
+        'GEMINI_API_KEY="AIzaXYZ987654321"\n'          # quotes
+        "export HF_TOKEN=​hf_tok en1234\n"   # export + invisible chars from a paste
+        "MISTRAL_API_KEY=\n"                            # blank: ignored
+        "OPENROUTER_KEY=sk-or-1\n"                      # typo in name
+        "GEMINI_API_KEY_2\n",                           # no '='
+        encoding="utf-8",
+    )
+    keys, problems = load_keys(f)
+    assert keys == {"GROQ_API_KEY": "gsk_abc123def456", "GEMINI_API_KEY": "AIzaXYZ987654321", "HF_TOKEN": "hf_token1234"}
+    import os
+    assert os.environ["GROQ_API_KEY"] == "gsk_abc123def456" and "MISTRAL_API_KEY" not in os.environ
+    assert any("did you mean OPENROUTER_API_KEY" in p for p in problems)
+    assert any("no '='" in p for p in problems)
+    assert mask("gsk_abc123def456") == "gsk_…f456 (16 chars)"
+
+
+def test_keys_env_flags_key_on_wrong_line(tmp_path, monkeypatch):
+    from agent_collab.keysfile import load_keys
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    f = tmp_path / "keys.env"
+    f.write_text("GEMINI_API_KEY=gsk_groqkey123456\n")
+    _, problems = load_keys(f)
+    assert any("looks like a GROQ_API_KEY key" in p for p in problems)
