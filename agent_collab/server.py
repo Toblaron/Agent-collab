@@ -406,6 +406,8 @@ def create_app(
             room.update_agent(name, data["agent"])
         elif kind == "remove_agent":
             room.remove_agent(name)
+        elif kind == "great_minds":
+            room.apply_great_minds()
         elif kind == "set_muted":
             room.set_muted(name, bool(data.get("muted", True)))
         elif kind == "set_max_turns":

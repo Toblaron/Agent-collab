@@ -58,11 +58,11 @@ def make_app(tmp_path, backend=None):
 def test_room_survives_a_server_restart(tmp_path):
     with TestClient(make_app(tmp_path)) as client, client.websocket_connect("/ws/trip") as ws:
         ws.receive_json()
-        ws.send_json({"type": "say", "text": "@Ada plan a trip"})
+        ws.send_json({"type": "say", "text": "@Turing plan a trip"})
         drain(ws, "stream_end")
         ws.send_json({"type": "set_whiteboard", "text": "# Trip plan"})
         drain(ws, "whiteboard")
-        ws.send_json({"type": "set_muted", "name": "Cy", "muted": True})
+        ws.send_json({"type": "set_muted", "name": "Socrates", "muted": True})
         drain(ws, "roster")
         ws.send_json({"type": "set_max_turns", "value": 20})
         drain(ws, "settings")
@@ -71,12 +71,12 @@ def test_room_survives_a_server_restart(tmp_path):
     # A brand-new app instance = a restart; it must find everything on disk.
     with TestClient(make_app(tmp_path)) as client, client.websocket_connect("/ws/trip") as ws:
         state = ws.receive_json()
-        assert state["messages"][0]["text"] == "@Ada plan a trip"
-        assert state["messages"][1]["author"] == "Ada"
+        assert state["messages"][0]["text"] == "@Turing plan a trip"
+        assert state["messages"][1]["author"] == "Turing"
         assert state["messages"][1]["meta"]["model"]  # who answered, with which model
         assert state["whiteboard"] == "# Trip plan" and state["whiteboard_by"] == "Human"
-        assert state["muted"] == ["Cy"] and state["max_turns"] == 20
-        assert state["title"] == "@Ada plan a trip"
+        assert state["muted"] == ["Socrates"] and state["max_turns"] == 20
+        assert state["title"] == "@Turing plan a trip"
         rooms = client.get("/api/rooms").json()
         assert rooms[0]["id"] == "trip" and rooms[0]["messages"] >= 2
 
@@ -102,12 +102,12 @@ def test_export_and_delete(tmp_path):
     with TestClient(make_app(tmp_path)) as client:
         with client.websocket_connect("/ws/exp") as ws:
             ws.receive_json()
-            ws.send_json({"type": "say", "text": "@Bo write a haiku"})
+            ws.send_json({"type": "say", "text": "@Tesla write a haiku"})
             drain(ws, "stream_end")
             ws.send_json({"type": "stop"})
         r = client.get("/api/rooms/exp/export.md")
         assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
-        assert "# @Bo write a haiku" in r.text and "**Bo**" in r.text and "## Conversation" in r.text
+        assert "# @Tesla write a haiku" in r.text and "**Tesla**" in r.text and "## Conversation" in r.text
         assert client.get("/api/rooms/nope/export.md").status_code == 404
         assert client.get("/api/rooms/..%2Fetc/export.md").status_code in (400, 404)
         assert client.delete("/api/rooms/exp").json() == {"deleted": True}
@@ -392,3 +392,79 @@ def test_permanent_speak_error_is_not_retried():
     assert Broken.tries == 1
     err = next(e for e in events if e["type"] == "error")
     assert err["text"] == "Mistral returned 404: model not found"  # no "ProviderError:" noise
+
+
+def test_new_rooms_start_with_great_minds():
+    from agent_collab.agents import DEFAULT_ROSTER, EXTRA_ROSTER
+
+    assert [a.name for a in DEFAULT_ROSTER] == ["Turing", "Tesla", "Socrates", "Curie"]
+    assert [a.name for a in EXTRA_ROSTER] == ["DaVinci", "Feynman", "Franklin", "Orwell"]
+
+
+def test_great_minds_renames_existing_team_and_keeps_history_coherent(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    old = [
+        Agent("Ada", "architect", "x", provider="gemini", model="gemini-flash-lite-latest"),
+        Agent("Bo", "builder", "x"),
+        Agent("Cy", "critic", "x"),
+        Agent("Dee", "researcher", "x", provider="groq", model="llama-3.3-70b-versatile", tools=("search",)),
+        Agent("Zed", "astronaut", "x"),  # no matching role: keeps its name
+    ]
+    room = Room("r", old, Scripted())
+    room.messages = [Message("Human", "@Dee open the debate, then @ada"), Message("Dee", "Bostrom says… @Cy?")]
+    room.whiteboard_by = "Ada"
+    room.muted = {"Cy"}
+    renames = room.apply_great_minds()
+    assert renames == {"Ada": "Turing", "Bo": "Tesla", "Cy": "Socrates", "Dee": "Curie"}
+    curie = next(a for a in room.agents if a.name == "Curie")
+    assert (curie.provider, curie.model, curie.tools) == ("groq", "llama-3.3-70b-versatile", ("search",))  # kept
+    assert "Marie Curie" in curie.persona
+    assert [a.name for a in room.agents][-1] == "Zed"
+    assert room.messages[0].text == "@Curie open the debate, then @Turing"
+    assert room.messages[1].author == "Curie" and room.messages[1].text.endswith("@Socrates?")
+    assert room.whiteboard_by == "Turing" and room.muted == {"Socrates"}
+    with pytest.raises(AgentError, match="Nobody to rename"):
+        room.apply_great_minds()
+
+
+def test_rename_via_edit_rewrites_history():
+    room = Room("r", [A, B], Scripted())
+    room.messages = [Message("A", "hi @B"), Message("B", "hey @A")]
+    room.update_agent("A", {"name": "Ann"})
+    assert [m.author for m in room.messages] == ["Ann", "B"] and room.messages[1].text == "hey @Ann"
+
+
+def test_avatar_validation():
+    from agent_collab.agents import agent_from_dict
+
+    png = "data:image/png;base64,iVBORw0KGgo="
+    assert agent_from_dict({"name": "P", "provider": "ollama", "avatar": png}, []).avatar == png
+    assert agent_from_dict({"name": "P", "provider": "ollama", "avatar": ""}, []).avatar is None
+    for bad in ("data:image/svg+xml;base64,PHN2Zz4=", "javascript:alert(1)", "data:image/png;base64,<script>",
+                "data:image/png;base64," + "A" * 300_001, 42):
+        with pytest.raises(AgentError):
+            agent_from_dict({"name": "P", "provider": "ollama", "avatar": bad}, [])
+
+
+def test_avatar_survives_edits_and_restart(tmp_path):
+    png = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQ=="
+    with TestClient(make_app(tmp_path)) as client, client.websocket_connect("/ws/pics") as ws:
+        ws.receive_json()
+        ws.send_json({"type": "update_agent", "name": "Turing", "agent": {"avatar": png}})
+        assert next(a for a in drain(ws, "roster")["agents"] if a["name"] == "Turing")["avatar"] == png
+        ws.send_json({"type": "update_agent", "name": "Turing", "agent": {"role": "chief architect"}})
+        assert next(a for a in drain(ws, "roster")["agents"] if a["name"] == "Turing")["avatar"] == png  # untouched
+        ws.send_json({"type": "say", "text": "@Tesla hi"})
+        drain(ws, "stream_end")
+        ws.send_json({"type": "stop"})
+    with TestClient(make_app(tmp_path)) as client, client.websocket_connect("/ws/pics") as ws:
+        state = ws.receive_json()
+        assert next(a for a in state["agents"] if a["name"] == "Turing")["avatar"] == png
+
+
+def test_rename_notice_comes_after_history_refresh():
+    room = Room("r", [Agent("Ada", "architect", "x")], Scripted())
+    q = room.subscribe()
+    room.apply_great_minds()
+    kinds = [e["type"] for e in [q.get_nowait() for _ in range(q.qsize())]]
+    assert kinds.index("history") < kinds.index("notice")  # the UI wipes the log on history

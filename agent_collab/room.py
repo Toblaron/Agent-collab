@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from .actions import MAX_WHITEBOARD_CHARS, SEARCH, Actions, extract_actions
-from .agents import Agent, AgentError, Message, agent_from_dict
+from .agents import GREAT_MINDS, Agent, AgentError, Message, agent_from_dict
 from .llm import Backend, Bid, ProviderError
 from .search import SearchError, Searcher, format_results
 
@@ -232,12 +232,59 @@ class Room:
         others = [a for a in self.agents if a.name != name]
         agent = agent_from_dict({**self.agents[idx].to_dict(), **data}, others)
         self.agents = [*self.agents[:idx], agent, *self.agents[idx + 1 :]]
-        if name in self.muted:
-            self.muted.discard(name)
-            self.muted.add(agent.name)
+        if agent.name != name:
+            self._rename_history({name: agent.name})
         renamed = f" (now {agent.name})" if agent.name != name else ""
-        self._roster_changed(f"{name}{renamed} updated: {agent.role}, {agent.model_id}")
+        note = f"{name}{renamed} updated: {agent.role}, {agent.model_id}"
+        if agent.name != name:
+            self._changed()
+            self._emit(self.snapshot())  # past messages changed author: clients re-render everything
+            self._emit({"type": "notice", "text": note})  # after the re-render, so it isn't wiped
+        else:
+            self._roster_changed(note)
         return agent
+
+    def apply_great_minds(self) -> dict[str, str]:
+        """Rename the team after thinkers who fit their roles (architect -> Turing, critic ->
+        Socrates…), keeping each agent's provider, model, tools and picture. Agents whose role
+        has no match keep their name. Returns {old name: new name}."""
+        taken = {a.name.lower() for a in self.agents}
+        renames: dict[str, str] = {}
+        agents = []
+        for a in self.agents:
+            preset = GREAT_MINDS.get(a.role.lower())
+            clash = preset is not None and preset.name.lower() in taken and preset.name != a.name
+            if preset is None or clash or preset.name in renames.values():
+                agents.append(a)
+                continue
+            agents.append(dataclasses.replace(a, name=preset.name, persona=preset.persona, color=preset.color))
+            if preset.name != a.name:
+                renames[a.name] = preset.name
+                taken.discard(a.name.lower())
+                taken.add(preset.name.lower())
+        if not renames:
+            raise AgentError("Nobody to rename: agents already have great-mind names, or their roles don't match any.")
+        self.agents = agents
+        self._rename_history(renames)
+        self._changed()
+        self._emit(self.snapshot())  # past messages changed author: clients re-render everything
+        self._emit({"type": "notice", "text": "Renamed: " + ", ".join(f"{old} → {new}" for old, new in renames.items())})
+        return renames
+
+    def _rename_history(self, renames: dict[str, str]) -> None:
+        """Keep the transcript coherent after renames: past authors, @mentions, whiteboard credit
+        and muting all follow the new names (agents would otherwise lose track of who said what)."""
+        for old, new in renames.items():
+            mention = re.compile(rf"@{re.escape(old)}\b", re.IGNORECASE)
+            for m in self.messages:
+                if m.author == old:
+                    m.author = new
+                m.text = mention.sub(f"@{new}", m.text)
+            if self.whiteboard_by == old:
+                self.whiteboard_by = new
+            if old in self.muted:
+                self.muted.discard(old)
+                self.muted.add(new)
 
     def remove_agent(self, name: str) -> None:
         if not any(a.name == name for a in self.agents):

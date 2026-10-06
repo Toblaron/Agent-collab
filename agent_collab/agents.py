@@ -23,6 +23,7 @@ class Agent:
     provider: str = "anthropic"
     model: str | None = None  # None = provider default
     tools: tuple[str, ...] = TOOLS
+    avatar: str | None = None  # data:image/... URL (uploaded picture); None = generated avatar
 
     @property
     def model_id(self) -> str:
@@ -41,6 +42,7 @@ class Agent:
             "provider": self.provider,
             "model": self.model_id,
             "tools": list(self.tools),
+            "avatar": self.avatar,
         }
 
     def system_prompt(self, roster: list["Agent"]) -> str:
@@ -94,7 +96,24 @@ def agent_from_dict(data: dict, existing: list[Agent], require_ready: bool = Tru
         color = "#6b7280"
     raw_tools = data.get("tools", list(TOOLS))
     tools = tuple(t for t in TOOLS if isinstance(raw_tools, (list, tuple)) and t in raw_tools)
-    return Agent(name=name, role=role, persona=persona, color=color, provider=provider, model=model, tools=tools)
+    avatar = clean_avatar(data.get("avatar"))
+    return Agent(name=name, role=role, persona=persona, color=color, provider=provider, model=model, tools=tools, avatar=avatar)
+
+
+# Pictures arrive as data URLs (the browser crops and shrinks them first). Only raster image
+# types are accepted: an SVG could carry script, and nothing else belongs in an <img>.
+AVATAR_RE = re.compile(r"^data:image/(png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$")
+MAX_AVATAR_CHARS = 300_000  # ~220 KB of image; the UI sends ~15-30 KB
+
+
+def clean_avatar(value) -> str | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str) or len(value) > MAX_AVATAR_CHARS:
+        raise AgentError("That picture is too large (max ~200 KB after resizing).")
+    if not AVATAR_RE.match(value):
+        raise AgentError("Pictures must be PNG, JPEG, WebP or GIF images.")
+    return value
 
 
 @dataclass
@@ -142,40 +161,46 @@ def render_transcript(messages: list[Message], window: int = TRANSCRIPT_WINDOW) 
     return "\n\n".join(parts)
 
 
+# The starter team: named after thinkers whose habits fit each role. Personas borrow the habit,
+# not the person: agents don't claim to *be* Turing or Curie.
 DEFAULT_ROSTER: list[Agent] = [
     Agent(
-        name="Ada",
+        name="Turing",
         role="architect",
         persona=(
-            "You think in systems: structure, trade-offs, interfaces, what breaks at scale. "
-            "You like to propose a concrete plan early and then let others poke holes in it."
+            "Named after Alan Turing, you think in systems: structure, trade-offs, interfaces, what breaks "
+            "at scale, and how to reduce a messy question to a precise one. You like to propose a concrete "
+            "plan early and then let others poke holes in it."
         ),
         color="#7c3aed",
     ),
     Agent(
-        name="Bo",
+        name="Tesla",
         role="builder",
         persona=(
-            "You turn ideas into concrete artifacts: code, step lists, drafts. You get impatient "
-            "with abstract debate and tend to say 'let me just sketch it'. You ship small, working pieces."
+            "Named after Nikola Tesla, you turn ideas into concrete artifacts: code, step lists, drafts, "
+            "prototypes. You get impatient with abstract debate and tend to say 'let me just sketch it'. "
+            "You ship small, working pieces."
         ),
         color="#0891b2",
     ),
     Agent(
-        name="Cy",
+        name="Socrates",
         role="critic",
         persona=(
-            "You are the constructive skeptic. You look for hidden assumptions, edge cases, risks and "
-            "simpler alternatives. You never block without offering a better option."
+            "Named after Socrates, you are the constructive skeptic. You question hidden assumptions, ask what "
+            "words really mean, and look for edge cases, risks and simpler alternatives. You never block "
+            "without offering a better option."
         ),
         color="#dc2626",
     ),
     Agent(
-        name="Dee",
+        name="Curie",
         role="researcher",
         persona=(
-            "You bring outside knowledge: prior art, known pitfalls, relevant facts and numbers. "
-            "You are clear about what you know versus what you are guessing."
+            "Named after Marie Curie, you bring outside knowledge: prior art, known pitfalls, relevant facts "
+            "and numbers, with the patience of careful measurement. You are clear about what you know versus "
+            "what you are guessing."
         ),
         color="#16a34a",
     ),
@@ -185,39 +210,44 @@ DEFAULT_ROSTER: list[Agent] = [
 # (AGENT_COLLAB_DEFAULT_PROVIDER=auto gives every usable provider its own agent).
 EXTRA_ROSTER: list[Agent] = [
     Agent(
-        name="Eve",
+        name="DaVinci",
         role="designer",
         persona=(
-            "You care about the people who will use the thing: flows, wording, what feels confusing. "
-            "You sketch quick alternatives and ask who it's for."
+            "Named after Leonardo da Vinci, you care about the people who will use the thing and about how "
+            "form and function meet: flows, wording, what feels confusing. You sketch quick alternatives "
+            "and ask who it's for."
         ),
         color="#d97706",
     ),
     Agent(
-        name="Fox",
+        name="Feynman",
         role="tester",
         persona=(
-            "You try to break things: weird inputs, failure modes, what happens at 3am. "
-            "You turn vague worries into concrete test cases."
+            "Named after Richard Feynman, you try to break things to understand them: weird inputs, failure "
+            "modes, what happens at 3am. You distrust explanations nobody can state simply, and you turn "
+            "vague worries into concrete test cases."
         ),
         color="#db2777",
     ),
     Agent(
-        name="Gus",
+        name="Franklin",
         role="product lead",
         persona=(
-            "You keep the team pointed at the goal: scope, priorities, what to cut. "
-            "You make decisions when the team is going in circles, and say why."
+            "Named after Benjamin Franklin, you keep the team pointed at the goal: scope, priorities, what "
+            "to cut, what's practical. You make decisions when the team is going in circles, and say why."
         ),
         color="#2563eb",
     ),
     Agent(
-        name="Hal",
+        name="Orwell",
         role="writer",
         persona=(
-            "You turn the team's work into clear words: summaries, docs, announcements. "
-            "You notice when something can't be explained simply and say so."
+            "Named after George Orwell, you turn the team's work into clear, honest words: summaries, docs, "
+            "announcements. You cut jargon and notice when something can't be explained simply, and say so."
         ),
         color="#64748b",
     ),
 ]
+
+# Starter names by role, for renaming an existing team (e.g. Ada the architect -> Turing).
+GREAT_MINDS = {a.role.lower(): a for a in [*DEFAULT_ROSTER, *EXTRA_ROSTER]}

@@ -100,12 +100,12 @@ def test_max_turns_caps_runaway_conversation():
 def test_mock_backend_conversation_terminates():
     async def go():
         room = Room("r", list(DEFAULT_ROSTER), MockBackend(delay=0))
-        await room.post_human("plan a launch @Ada")
+        await room.post_human("plan a launch @Turing")
         await room.wait_idle()
         return room
 
     room = run(go())
-    assert room.messages[1].author == "Ada"  # mention wins the floor
+    assert room.messages[1].author == "Turing"  # mention wins the floor
     assert 2 <= len(room.messages) <= 1 + RoomSettings().max_agent_turns
 
 
@@ -114,7 +114,7 @@ def test_websocket_end_to_end():
     with TestClient(app) as client, client.websocket_connect("/ws/test") as ws:
         hello = ws.receive_json()
         assert hello["type"] == "history" and len(hello["agents"]) == 4
-        ws.send_json({"type": "say", "text": "@Bo build it"})
+        ws.send_json({"type": "say", "text": "@Tesla build it"})
         seen = []
         while True:
             ev = ws.receive_json()

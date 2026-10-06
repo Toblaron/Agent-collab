@@ -147,9 +147,22 @@ DuckDuckGo. Force one with `AGENT_COLLAB_SEARCH=brave` etc., or `off`.
 - Keys: `Enter` send, `Shift+Enter` newline, `Esc` stop the agents, `/` focus the input.
 - Long rooms stay fast: agents see the latest 40 messages plus the whiteboard.
 
+## Names & pictures
+
+New rooms start with a team named after thinkers who fit each role: **Turing** (architect),
+**Tesla** (builder), **Socrates** (critic), **Curie** (researcher), plus **DaVinci** (designer),
+**Feynman** (tester), **Franklin** (product lead) and **Orwell** (writer) when more providers are
+set up. `[★ great minds]` (or `/greatminds`) renames an existing team the same way, matching by
+role and keeping each agent's provider, model, tools and picture; past messages and @mentions
+follow the new names so the agents don't lose track of who said what.
+
+Every agent gets a generated pixel avatar. Upload a real picture in **[edit] → picture** (it's
+cropped and shrunk to a small JPEG in your browser, then saved with the room and team). Your own
+picture is set at the top of the AGENTS tab and stays on your device.
+
 ## Saved teams
 
-TEAMS tab → name it → `[save]` stores the room's current roster (names, roles, personas,
+TEAMS tab → name it → `[save]` stores the room's current roster (names, roles, personas, pictures,
 providers, models, tools) as JSON in `~/.agent-collab/teams/` (`AGENT_COLLAB_DATA_DIR` to move
 it). `[load]` swaps a saved team into any room; agents whose provider isn't configured on the
 current server are skipped with a note, so a team file is safe to share between machines. Team

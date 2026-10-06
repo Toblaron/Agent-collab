@@ -212,15 +212,15 @@ def test_auto_roster_gives_every_usable_provider_an_agent(monkeypatch):
     monkeypatch.setattr(server, "check_providers", lambda refresh=False: fake({"gemini", "groq"}))
     team = server.default_roster()
     assert [(a.name, a.provider, a.model) for a in team] == [
-        ("Ada", "gemini", "gemini-model"), ("Bo", "groq", "groq-model"),
-        ("Cy", "gemini", "gemini-model"), ("Dee", "groq", "groq-model"),
+        ("Turing", "gemini", "gemini-model"), ("Tesla", "groq", "groq-model"),
+        ("Socrates", "gemini", "gemini-model"), ("Curie", "groq", "groq-model"),
     ]
 
     six = {"gemini", "groq", "openrouter", "mistral", "huggingface", "ollama"}
     monkeypatch.setattr(server, "check_providers", lambda refresh=False: fake(six))
     team = server.default_roster()
     assert len(team) == 6 and {a.provider for a in team} == six
-    assert [a.name for a in team][4:] == ["Eve", "Fox"]
+    assert [a.name for a in team][4:] == ["DaVinci", "Feynman"]
 
     monkeypatch.setattr(server, "check_providers", lambda refresh=False: fake(set()))
     assert {a.provider for a in server.default_roster()} == {"anthropic"}  # nothing usable: plain default

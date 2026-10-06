@@ -159,11 +159,25 @@
   .pane { flex: 1; min-height: 0; padding: 14px; display: none; }
   .pane.on { display: block; }
   .pane > h2 { font-size: 12px; color: var(--muted); font-weight: 400; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
-  .pane > h2 .right { margin-left: auto; display: flex; gap: 4px; }
+  .pane > h2 .right { margin-left: auto; display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+  .pane > h2 button { white-space: nowrap; }
   .pane > h2 button { font-size: 12px; }
 
   .agent { margin-bottom: 14px; font-size: 12.5px; }
+  .av { flex: none; width: 22px; height: 22px; object-fit: cover; border: 1px solid var(--c, var(--border));
+        background: var(--panel-solid); image-rendering: pixelated; }
+  .av.photo { image-rendering: auto; }
+  .line .head .av { align-self: center; }
+  .agent { display: grid; grid-template-columns: 44px minmax(0, 1fr); column-gap: 10px; }
+  .agent > .av { width: 44px; height: 44px; grid-row: span 6; cursor: pointer; }
+  .agent > :not(.av) { grid-column: 2; min-width: 0; }
   .agent .top { display: flex; gap: 8px; align-items: baseline; }
+  .me { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; font-size: 12.5px; color: var(--muted); }
+  .me .av { width: 44px; height: 44px; --c: var(--human); }
+  .me b { color: var(--human); font-weight: 400; }
+  .pic { display: flex; align-items: center; gap: 10px; }
+  .pic .av { width: 56px; height: 56px; }
+  #suggest .av { width: 18px; height: 18px; }
   .agent .name { color: var(--c); font-weight: 700; text-shadow: var(--soft-glow); }
   .agent .role { color: var(--muted); }
   .agent .acts { margin-left: auto; display: flex; gap: 0; }
@@ -274,7 +288,8 @@
 
   <aside>
     <section class="pane scroll on" id="pane-agents">
-      <h2>// who wants the floor <span class="right"><button type="button" id="addBtn">[+ agent]</button></span></h2>
+      <h2>// team <span class="right"><button type="button" class="ghost" id="greatMindsBtn" title="Rename the team after thinkers who fit their roles (/greatminds)">[★ great minds]</button><button type="button" id="addBtn">[+ agent]</button></span></h2>
+      <div class="me"><img class="av" id="meAvatar" alt="your picture"><div><b>you</b> · your picture on your messages (stays on this device)<div class="row" style="margin-top:4px"><button type="button" class="ghost" id="mePick">[upload picture]</button><button type="button" class="ghost" id="meClear">[remove]</button></div></div></div>
       <div id="agents"></div>
       <div class="setting">
         <label for="maxTurns">agent turns per message</label>
@@ -335,6 +350,10 @@
     <label for="fPersona">personality &amp; expertise</label>
     <textarea id="fPersona" rows="3" maxlength="2000"
       placeholder="You care about the user experience above all. You sketch flows and question jargon."></textarea>
+    <label>picture</label>
+    <div class="pic"><img class="av" id="fAvatar" alt="agent picture">
+      <button type="button" class="ghost" id="fPick">[upload]</button>
+      <button type="button" class="ghost" id="fClear">[use generated]</button></div>
     <label>tools</label>
     <div class="checks">
       <label><input type="checkbox" id="fToolBoard" checked> whiteboard</label>
@@ -461,7 +480,7 @@ function applyTheme(t) {
   document.documentElement.dataset.theme = t;
   document.querySelector('meta[name="theme-color"]').content = t === "matrix" ? "#020703" : "#f6f7f6";
   store.set("ac-theme", t);
-  renderAgents(); recolorLog();
+  renderAgents(); recolorLog(); refreshAvatars();
 }
 $("themeBtn").onclick = () => applyTheme(theme() === "matrix" ? "light" : "matrix");
 document.documentElement.dataset.theme = store.get("ac-theme", "matrix");
@@ -583,6 +602,76 @@ function updateJump() {
 log.addEventListener("scroll", updateJump, { passive: true });
 $("jump").onclick = () => { log.scrollTo({ top: log.scrollHeight, behavior: "smooth" }); unseen = 0; };
 
+// ---------- avatars: uploaded pictures, else a generated pixel avatar unique to the name ----------
+const avatarCache = {};
+function hash(str) { let h = 2166136261; for (const c of str) { h ^= c.codePointAt(0); h = Math.imul(h, 16777619); } return h >>> 0; }
+function identicon(name, color) {
+  const key = `${name}|${color}|${theme()}`;
+  if (avatarCache[key]) return avatarCache[key];
+  const fg = readable(color), bg = theme() === "matrix" ? "#03110a" : "#ffffff";
+  let h = hash(name.toLowerCase()), cells = "";
+  for (let y = 0; y < 5; y++) for (let x = 0; x < 3; x++) {      // 5x5, mirrored left-right
+    if ((h >> (y * 3 + x)) & 1) {
+      cells += `<rect x="${x + 1}" y="${y + 1}" width="1" height="1"/>`;
+      if (x < 2) cells += `<rect x="${5 - x}" y="${y + 1}" width="1" height="1"/>`;
+    }
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 7 7" shape-rendering="crispEdges"><rect width="7" height="7" fill="${bg}"/><g fill="${fg}">${cells}</g></svg>`;
+  return (avatarCache[key] = "data:image/svg+xml," + encodeURIComponent(svg));
+}
+const AV_SAFE = /^data:image\/(png|jpeg|webp|gif);base64,/;
+function avatarSrc(author) {
+  if (author === "Human") { const mine = store.get("ac-avatar", ""); return AV_SAFE.test(mine) ? mine : identicon("you", "#e8ffe9"); }
+  if (author === "Search") return identicon("search", "#5ce1ff");
+  const a = info[author];
+  return a && AV_SAFE.test(a.avatar || "") ? a.avatar : identicon(author, a?.color || "#888888");
+}
+function avatarImg(author, extra = "") {
+  const img = document.createElement("img");
+  img.className = "av" + (extra ? " " + extra : ""); img.alt = ""; img.dataset.author = author;
+  img.src = avatarSrc(author);
+  if (/^data:image\/(png|jpeg|webp|gif)/.test(img.src)) img.classList.add("photo");
+  return img;
+}
+function refreshAvatars() {
+  for (const img of document.querySelectorAll("img.av[data-author]")) {
+    img.src = avatarSrc(img.dataset.author);
+    img.classList.toggle("photo", /^data:image\/(png|jpeg|webp|gif)/.test(img.src));
+  }
+  $("meAvatar").src = avatarSrc("Human");
+}
+// Pick an image from the phone/computer, crop to a centred square and shrink it to 160px JPEG
+// (~10-20 KB) before it ever leaves the browser.
+function pickImage() {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file"; input.accept = "image/*";
+    input.onchange = () => {
+      const file = input.files && input.files[0];
+      if (!file) return resolve(null);
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        const side = Math.min(img.naturalWidth, img.naturalHeight), size = 160;
+        const c = document.createElement("canvas"); c.width = c.height = size;
+        const ctx = c.getContext("2d");
+        ctx.fillStyle = "#000"; ctx.fillRect(0, 0, size, size);
+        ctx.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, size, size);
+        URL.revokeObjectURL(url);
+        resolve(c.toDataURL("image/jpeg", 0.85));
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); toast("couldn't read that image"); resolve(null); };
+      img.src = url;
+    };
+    input.click();
+  });
+}
+$("mePick").onclick = async () => {
+  const data = await pickImage();
+  if (data) { store.set("ac-avatar", data); refreshAvatars(); toast("picture updated"); }
+};
+$("meClear").onclick = () => { store.set("ac-avatar", ""); refreshAvatars(); };
+
 function stamp(ts) { return new Date((ts || Date.now() / 1000) * 1000).toTimeString().slice(0, 8); }
 function shortModel(m) { return (m || "").split("/").pop(); }
 
@@ -596,7 +685,7 @@ function line(author, text, { id, ts, meta } = {}) {
   if (id) el.dataset.id = id;
   const head = document.createElement("div");
   head.className = "head";
-  head.append(`[${stamp(ts)}]`);
+  head.append(avatarImg(author), `[${stamp(ts)}]`);
   const who = document.createElement("span");
   who.className = "who";
   const a = info[author];
@@ -639,7 +728,7 @@ function sys(text, cls, action) {
 }
 
 const STARTERS = [
-  "Plan a cozy game night for 6 friends on a tiny budget. @Ada start, put the plan on the whiteboard.",
+  "Plan a cozy game night for 6 friends on a tiny budget. @Turing start, put the plan on the whiteboard.",
   "Brainstorm 10 names for a coffee shop that's also a bike repair place, then pick the best 3.",
   "Here's my startup idea: a subscription for houseplant care. Poke holes in it, then improve it.",
   "Write a short sci-fi story together, one paragraph each. Keep the whiteboard as the story so far.",
@@ -698,6 +787,8 @@ function renderAgents(list, mutedList) {
     muteBtn.title = isMuted ? "Let this agent talk again" : "Bench this agent without removing it";
     muteBtn.onclick = () => send({ type: "set_muted", name: a.name, muted: !isMuted });
     el.querySelector('[data-act="edit"]').onclick = () => openAgentDialog(a);
+    const av = avatarImg(a.name); av.title = `edit ${a.name}`; av.onclick = () => openAgentDialog(a);
+    el.prepend(av);
     el.querySelector('[data-act="remove"]').onclick = () => {
       if (confirm(`Remove ${a.name} from the room?`)) send({ type: "remove_agent", name: a.name });
     };
@@ -862,7 +953,7 @@ function connect() {
         log.scrollTop = log.scrollHeight; updateJump();
         break;
       case "roster":
-        lastBids = { bids: [], winner: null }; renderAgents(ev.agents, ev.muted);
+        lastBids = { bids: [], winner: null }; renderAgents(ev.agents, ev.muted); refreshAvatars();
         if (pendingAgent && ev.agents.some(a => a.name === pendingAgent)) { pendingAgent = null; dlg.close(); }
         break;
       case "settings": $("maxTurns").value = ev.max_turns; toast(`agent turns per message: ${ev.max_turns}`); break;
@@ -955,6 +1046,7 @@ const COMMANDS = [
   ["/unmute", "let an agent talk again: /unmute name"],
   ["/turns", "agent turns per message: /turns 20"],
   ["/board", "open the whiteboard"],
+  ["/greatminds", "rename the team after thinkers who fit their roles"],
   ["/theme", "switch matrix / light"],
   ["/rain", "toggle the digital rain"],
   ["/help", "list commands"],
@@ -974,6 +1066,7 @@ function runCommand(text) {
     case "/unmute": if (need("name")) send({ type: "set_muted", name: arg.replace(/^@/, ""), muted: false }); break;
     case "/turns": if (need("number")) send({ type: "set_max_turns", value: +arg }); break;
     case "/board": showTab("board"); break;
+    case "/greatminds": greatMinds(); break;
     case "/theme": $("themeBtn").click(); break;
     case "/rain": rain.toggle(); break;
     case "/help": sys("commands: " + COMMANDS.map(c => c[0]).join(" ") + "  ·  @name hands the floor to an agent  ·  Esc stops  ·  / focuses input"); break;
@@ -989,6 +1082,7 @@ function showSuggest(items, apply) {
   items.forEach(([label, hint], i) => {
     const d = document.createElement("div");
     d.className = i === sugIndex ? "sel" : "";
+    if (label.startsWith("@")) d.append(avatarImg(label.slice(1)));
     d.append(label); const s = document.createElement("span"); s.textContent = hint; d.append(s);
     d.onmousedown = (e) => { e.preventDefault(); apply(label); };
     suggest.append(d);
@@ -1086,8 +1180,21 @@ async function onProviderChange(keepModel) {
   } catch { fModel.placeholder = "couldn't load the model list; type a model id"; }
 }
 fProvider.onchange = () => onProviderChange(false);
+let dialogAvatar;  // undefined = unchanged, null = back to generated, "data:..." = new upload
+function showDialogAvatar() {
+  const img = $("fAvatar"), name = $("fName").value.trim() || "new agent";
+  img.style.setProperty("--c", readable($("fColor").value));
+  img.src = dialogAvatar ? dialogAvatar
+    : dialogAvatar === undefined && editingName && AV_SAFE.test(info[editingName]?.avatar || "") ? info[editingName].avatar
+    : identicon(name, $("fColor").value);
+}
+$("fPick").onclick = async () => { const d = await pickImage(); if (d) { dialogAvatar = d; showDialogAvatar(); } };
+$("fClear").onclick = () => { dialogAvatar = null; showDialogAvatar(); };
+$("fName").addEventListener("input", showDialogAvatar);
+$("fColor").addEventListener("input", showDialogAvatar);
 async function openAgentDialog(agent) {
   editingName = agent ? agent.name : null;
+  dialogAvatar = undefined;
   $("formError").textContent = "";
   $("dialogTitle").textContent = agent ? `> edit_agent ${agent.name.toLowerCase()}` : "> spawn_agent";
   $("submitAgent").textContent = agent ? "[save]" : "[spawn]";
@@ -1109,11 +1216,16 @@ async function openAgentDialog(agent) {
   search.disabled = !config.search;
   if (!config.search) search.checked = false;
   search.parentElement.title = config.search ? "" : "Search is turned off on this server (AGENT_COLLAB_SEARCH)";
+  showDialogAvatar();
   dlg.showModal();
   refreshRails();
   $("fName").focus();
 }
 $("addBtn").onclick = () => openAgentDialog(null);
+function greatMinds() {
+  if (confirm("Rename the team after thinkers who fit their roles (architect → Turing, builder → Tesla, critic → Socrates, researcher → Curie…)? Models, tools and pictures stay the same; past messages follow the new names.")) send({ type: "great_minds" });
+}
+$("greatMindsBtn").onclick = greatMinds;
 $("cancelAgent").onclick = () => dlg.close();
 dlg.addEventListener("close", () => { pendingAgent = null; });
 $("agentForm").onsubmit = (e) => {
@@ -1128,6 +1240,7 @@ $("agentForm").onsubmit = (e) => {
     color: $("fColor").value,
     tools: [$("fToolBoard").checked && "whiteboard", $("fToolSearch").checked && "search"].filter(Boolean),
   };
+  if (dialogAvatar !== undefined) agent.avatar = dialogAvatar;  // null removes an uploaded picture
   pendingAgent = agent.name;  // the dialog closes on the roster event that confirms it; errors land in #formError
   if (editingName) send({ type: "update_agent", name: editingName, agent });
   else send({ type: "add_agent", agent });
@@ -1149,6 +1262,7 @@ refreshRails();
   } catch {}
   try { await loadProviders(); } catch {}
   rain.start();
+  refreshAvatars();
   connect();
 })();
 </script>
