@@ -357,3 +357,37 @@ def test_compat_backend_retries_busy_provider(monkeypatch):
     assert run(busy.bid(GROQ_AGENT, [GROQ_AGENT], [])).reason == "(provider busy)"
     with pytest.raises(Exception, match="503: high demand"):
         run(speak(busy))
+
+
+def test_provider_check_never_hangs_startup(monkeypatch):
+    import time as _time
+
+    from agent_collab import server
+
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    def slow_or_fast(pid, budget=0):
+        if pid == "groq":
+            _time.sleep(5)  # a provider that hangs
+        return server.ProviderCheck(pid, False, None, "no key")
+
+    monkeypatch.setattr(server, "check_provider", slow_or_fast)
+    seen = []
+    start = _time.monotonic()
+    checks = server.check_providers(refresh=True, deadline=0.5, on_result=seen.append)
+    assert _time.monotonic() - start < 2
+    groq = next(c for c in checks if c.id == "groq")
+    assert groq.ok and "timed out" in groq.note  # key is trusted, real errors surface in the chat
+    assert len(seen) == len(server.AUTO_ORDER)  # progress reported for every provider
+
+
+def test_fast_start_skips_network(monkeypatch):
+    from agent_collab import server
+
+    monkeypatch.setenv("AGENT_COLLAB_SKIP_CHECK", "1")
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    monkeypatch.setattr(server, "check_provider", lambda *a: (_ for _ in ()).throw(AssertionError("no network!")))
+    checks = {c.id: c for c in server.check_providers(refresh=True)}
+    assert checks["groq"].ok and checks["groq"].note == "not checked (fast start)"
+    assert not checks["ollama"].ok

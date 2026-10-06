@@ -6,7 +6,10 @@ import asyncio
 import contextlib
 import dataclasses
 import os
-from concurrent.futures import ThreadPoolExecutor
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,7 +79,7 @@ def candidate_models(pid: str, default: str, ids: list[str]) -> list[str]:
     return out or chat[:1] or [default]
 
 
-def probe_chat(spec, model: str) -> tuple[int, str]:
+def probe_chat(spec, model: str, timeout: float = 12.0) -> tuple[int, str]:
     """One tiny real request: the only way to know a model will actually answer
     (listed models can be retired for new accounts, or overloaded right now)."""
     try:
@@ -84,17 +87,18 @@ def probe_chat(spec, model: str) -> tuple[int, str]:
             f"{spec.url}/chat/completions",
             headers=auth_headers(spec),
             json={"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "max_tokens": 5},
-            timeout=30.0,
+            timeout=timeout,
         )
     except httpx.HTTPError:
         return 0, "unreachable"
     return r.status_code, r.text
 
 
-MAX_PROBES = 4
+MAX_PROBES = 3
+CHECK_DEADLINE = 20.0  # seconds for the whole startup check; slow providers are assumed fine
 
 
-def check_provider(pid: str) -> ProviderCheck:
+def check_provider(pid: str, budget: float = CHECK_DEADLINE) -> ProviderCheck:
     """Is this provider usable right now? Lists its models (proves the key), then sends a
     5-token request to the best candidate, falling back through listed models when one is
     retired or overloaded. Costs a handful of tokens on free tiers."""
@@ -107,8 +111,9 @@ def check_provider(pid: str) -> ProviderCheck:
         return ProviderCheck(pid, True, spec.default_model, "key set (not verified)")
     if not spec.configured:
         return ProviderCheck(pid, False, None, "no key" if pid != "custom" else "no CUSTOM_LLM_BASE_URL")
+    stop_at = time.monotonic() + budget
     try:
-        r = httpx.get(f"{spec.url}/models", headers=auth_headers(spec), timeout=8.0)
+        r = httpx.get(f"{spec.url}/models", headers=auth_headers(spec), timeout=min(6.0, budget))
     except httpx.HTTPError:
         return ProviderCheck(pid, False, None, "not running" if pid == "ollama" else "unreachable")
     if r.status_code in (401, 403) or (r.status_code == 400 and "key" in r.text.lower()):  # Gemini: 400
@@ -128,7 +133,10 @@ def check_provider(pid: str) -> ProviderCheck:
     busy: str | None = None
     tried = []
     for model in candidate_models(pid, spec.default_model, ids)[:MAX_PROBES]:
-        status, body = probe_chat(spec, model)
+        remaining = stop_at - time.monotonic()
+        if remaining < 2:
+            break
+        status, body = probe_chat(spec, model, timeout=min(12.0, remaining))
         if status == 200:
             note = "ok" if model == spec.default_model else f"ok (using {model}; {', '.join(tried)} unavailable)"
             return ProviderCheck(pid, True, model, note)
@@ -139,18 +147,74 @@ def check_provider(pid: str) -> ProviderCheck:
         tried.append(model)
     if busy:
         return ProviderCheck(pid, True, busy, "ok, but busy/rate-limited right now (agents will retry)")
+    if not tried:  # ran out of time before any test message: the key is valid (listing worked)
+        model = candidate_models(pid, spec.default_model, ids)[0]
+        return ProviderCheck(pid, True, model, "key ok; slow to answer (not fully tested)")
     return ProviderCheck(pid, False, None, f"no model answered (tried {', '.join(tried)})")
 
 
 _checks: list[ProviderCheck] | None = None
 
 
-def check_providers(refresh: bool = False) -> list[ProviderCheck]:
+def _assumed(pid: str) -> ProviderCheck:
+    """Result for a provider whose check didn't finish in time: trust the key, keep the default model."""
+    spec = PROVIDERS[pid]
+    if pid == "ollama":
+        has_key = False  # no key to trust; Ollama counts only when it's actually answering
+    elif pid == "anthropic":
+        has_key = spec.configured and bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"))
+    else:
+        has_key = spec.configured
+    note = "check timed out; using default model" if has_key else "check timed out"
+    return ProviderCheck(pid, has_key, spec.default_model if has_key else None, note)
+
+
+def check_providers(
+    refresh: bool = False,
+    deadline: float = CHECK_DEADLINE,
+    on_result: Callable[[ProviderCheck], None] | None = None,
+) -> list[ProviderCheck]:
+    """Check every provider in parallel, reporting each as it finishes. Never takes much
+    longer than `deadline`: anything still running is assumed fine and checked for real
+    the first time an agent talks to it."""
     global _checks
-    if _checks is None or refresh:
-        with ThreadPoolExecutor(max_workers=len(AUTO_ORDER)) as pool:
-            _checks = list(pool.map(check_provider, AUTO_ORDER))
+    if _checks is not None and not refresh:
+        return _checks
+    if os.environ.get("AGENT_COLLAB_SKIP_CHECK") == "1":
+        _checks = []
+        for pid in AUTO_ORDER:
+            c = _assumed(pid)
+            c.note = "not checked (fast start)" if c.ok else ("no key" if pid != "ollama" else "not checked")
+            _checks.append(c)
+        return _checks
+    pool = ThreadPoolExecutor(max_workers=len(AUTO_ORDER))
+    futures = {pool.submit(check_provider, pid, deadline - 2): pid for pid in AUTO_ORDER}
+    results: dict[str, ProviderCheck] = {}
+    try:
+        for fut in as_completed(futures, timeout=deadline):
+            pid = futures[fut]
+            try:
+                results[pid] = fut.result()
+            except Exception as e:  # never let one provider's surprise break startup
+                results[pid] = ProviderCheck(pid, False, None, f"check failed ({type(e).__name__})")
+            if on_result:
+                on_result(results[pid])
+    except FuturesTimeout:
+        for pid in AUTO_ORDER:
+            if pid not in results:
+                results[pid] = _assumed(pid)
+                if on_result:
+                    on_result(results[pid])
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    _checks = [results[pid] for pid in AUTO_ORDER]
     return _checks
+
+
+def format_check(c: ProviderCheck) -> str:
+    unset = c.note.startswith(("no ", "not running", "not installed", "not checked"))
+    mark = "OK " if c.ok else ("-- " if unset else "!! ")
+    return f"  {mark}{PROVIDERS[c.id].label:<28} {c.model + '  ' if c.ok else ''}{c.note}"
 
 
 def usable_providers() -> list[str]:
@@ -288,18 +352,14 @@ def main() -> None:
     mock = os.environ.get("AGENT_COLLAB_MOCK") == "1"
     default = os.environ.get("AGENT_COLLAB_DEFAULT_PROVIDER", "anthropic")
     if not mock and default == "auto":
-        print("Checking providers…", flush=True)
-        lines = ["Provider check:"]
-        for c in check_providers():
-            unset = c.note.startswith(("no ", "not running", "not installed"))
-            mark = "OK " if c.ok else ("-- " if unset else "!! ")
-            lines.append(f"  {mark}{PROVIDERS[c.id].label:<28} {c.model + '  ' if c.ok else ''}{c.note}")
+        print(f"Checking providers (up to {CHECK_DEADLINE:.0f}s; `bash run.sh fast` skips this)…", flush=True)
+        checks = check_providers(on_result=lambda c: print(format_check(c), flush=True))
         team = default_roster()
-        if any(c.ok for c in check_providers()):
-            lines.append("Starter team:")
+        if any(c.ok for c in checks):
+            lines = ["Starter team:"]
             lines += [f"  {a.name:<4} {a.role:<13} {PROVIDERS[a.provider].label} · {a.model_id}" for a in team]
         else:
-            lines.append("No provider is usable yet: add a key to keys.env (see keys.env.example), then rerun.")
+            lines = ["No provider is usable yet: add a key to keys.env (see keys.env.example), then rerun."]
         print("\n".join(lines), flush=True)
     elif not mock and default in PROVIDERS and not PROVIDERS[default].configured:
         hint = (
@@ -312,8 +372,7 @@ def main() -> None:
             flush=True,
         )
 
-    uvicorn.run(
-        "agent_collab.server:app",
-        host=os.environ.get("HOST", "127.0.0.1"),
-        port=int(os.environ.get("PORT", "8000")),
-    )
+    host, port = os.environ.get("HOST", "127.0.0.1"), int(os.environ.get("PORT", "8000"))
+    shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    print(f"\n>>> Ready: open http://{shown}:{port} in your browser. Stop with CTRL+C.\n", flush=True)
+    uvicorn.run("agent_collab.server:app", host=host, port=port, log_level="warning")

@@ -26,10 +26,8 @@ def doctor(keys: dict, problems: list) -> None:
         print(f"  {name:<20} {mask(value)}")
     for p in problems:
         print(f"  !! {p}")
-    print("Provider check (sends a 5-token test message to each provider):")
-    for c in server.check_providers():
-        mark = "OK " if c.ok else ("-- " if c.note.startswith(("no ", "not running", "not installed")) else "!! ")
-        print(f"  {mark}{PROVIDERS[c.id].label:<28} {c.model + '  ' if c.ok else ''}{c.note}")
+    print(f"Provider check (a 5-token test message each, up to {server.CHECK_DEADLINE:.0f}s):", flush=True)
+    server.check_providers(on_result=lambda c: print(server.format_check(c), flush=True))
     print("Share this screen if something shows !! (keys above are masked).")
 
 
@@ -49,12 +47,13 @@ def main() -> None:
             has_provider = httpx.get(f"{PROVIDERS['ollama'].url}/models", timeout=1.0).status_code == 200
         except httpx.HTTPError:
             pass
+    if mode == "fast":
+        os.environ["AGENT_COLLAB_SKIP_CHECK"] = "1"
     if mode == "demo" or not has_provider:
         os.environ["AGENT_COLLAB_MOCK"] = "1"
         print("Demo mode (mock agents). For real agents: cp keys.env.example keys.env, add a key, rerun.", flush=True)
     else:
         os.environ.setdefault("AGENT_COLLAB_DEFAULT_PROVIDER", "auto")
-    print("Open http://127.0.0.1:8000 in your browser. Stop with CTRL+C.", flush=True)
     from .server import main as serve
     serve()
 
