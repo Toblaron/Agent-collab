@@ -17,10 +17,10 @@ class ScriptedBackend:
         self.delay = delay
         self.spoke: list[str] = []
 
-    async def bid(self, agent, roster, transcript):
+    async def bid(self, agent, roster, transcript, whiteboard=""):
         return Bid(urgency=self.urgencies.get(agent.name, 0.0), reason="scripted")
 
-    async def speak(self, agent, roster, transcript):
+    async def speak(self, agent, roster, transcript, whiteboard=""):
         self.spoke.append(agent.name)
         for word in ["hello", "from", agent.name]:
             await asyncio.sleep(self.delay)

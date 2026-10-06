@@ -14,10 +14,13 @@ import contextlib
 import random
 from dataclasses import dataclass
 
+from .actions import MAX_WHITEBOARD_CHARS, Actions, extract_actions
 from .agents import Agent, AgentError, Message, agent_from_dict
 from .llm import Backend, Bid
+from .search import SearchError, Searcher, format_results
 
 HUMAN = "Human"
+SEARCH_AUTHOR = "Search"
 MAX_AGENTS = 8
 
 
@@ -45,12 +48,22 @@ class ScoredBid:
 
 
 class Room:
-    def __init__(self, room_id: str, agents: list[Agent], backend: Backend, settings: RoomSettings | None = None):
+    def __init__(
+        self,
+        room_id: str,
+        agents: list[Agent],
+        backend: Backend,
+        settings: RoomSettings | None = None,
+        searcher: Searcher | None = None,
+    ):
         self.id = room_id
         self.agents = agents
         self.backend = backend
         self.settings = settings or RoomSettings()
+        self.searcher = searcher
         self.messages: list[Message] = []
+        self.whiteboard = ""
+        self.whiteboard_by: str | None = None
         self._subscribers: set[asyncio.Queue] = set()
         self._task: asyncio.Task | None = None
         self._rng = random.Random()
@@ -76,6 +89,9 @@ class Room:
             "agents": [a.to_dict() for a in self.agents],
             "messages": [m.to_dict() for m in self.messages],
             "running": self.running,
+            "whiteboard": self.whiteboard,
+            "whiteboard_by": self.whiteboard_by,
+            "search": self.searcher.name if self.searcher else None,
         }
 
     # ---- control -------------------------------------------------------
@@ -112,6 +128,31 @@ class Room:
         self._emit_roster()
         self._emit({"type": "notice", "text": f"{name} left the room"})
 
+    def load_roster(self, agent_dicts: list[dict], label: str) -> list[str]:
+        """Replace the roster with a saved team. Agents that can't run here (e.g. their
+        provider isn't configured on this server) are skipped; returns the reasons."""
+        loaded: list[Agent] = []
+        skipped: list[str] = []
+        for data in agent_dicts[:MAX_AGENTS]:
+            try:
+                loaded.append(agent_from_dict(data, loaded))
+            except AgentError as e:
+                skipped.append(f"{data.get('name', '?')}: {e}")
+        if not loaded:
+            raise AgentError(f"None of the agents in {label} can run here. " + " ".join(skipped))
+        self.agents = loaded
+        self._emit_roster()
+        note = f"Loaded team {label}: {', '.join(a.name for a in loaded)}"
+        if skipped:
+            note += f" (skipped {'; '.join(skipped)})"
+        self._emit({"type": "notice", "text": note})
+        return skipped
+
+    def set_whiteboard(self, text: str, by: str) -> None:
+        self.whiteboard = text[:MAX_WHITEBOARD_CHARS]
+        self.whiteboard_by = by
+        self._emit({"type": "whiteboard", "text": self.whiteboard, "by": by})
+
     def _emit_roster(self) -> None:
         self._emit({"type": "roster", "agents": [a.to_dict() for a in self.agents]})
 
@@ -135,7 +176,8 @@ class Room:
         last_author = self.messages[-1].author if self.messages else None
         bidders = [a for a in self.agents if a.name != last_author and a.name not in muted]
         transcript = list(self.messages)
-        bids = await asyncio.gather(*(self.backend.bid(a, self.agents, transcript) for a in bidders))
+        board = self.whiteboard
+        bids = await asyncio.gather(*(self.backend.bid(a, self.agents, transcript, board) for a in bidders))
         scored = [ScoredBid(a, b, self._score(a, b)) for a, b in zip(bidders, bids)]
         return sorted(scored, key=lambda s: s.score, reverse=True)
 
@@ -157,26 +199,48 @@ class Room:
                 if winner is None:
                     break  # natural silence: nobody has anything worth adding
                 try:
-                    await self._speak(winner.agent)
+                    actions = await self._speak(winner.agent)
                 except Exception as e:  # provider down, bad model ID, rate limit...
                     muted.add(winner.agent.name)
                     self._emit({"type": "error", "agent": winner.agent.name, "text": f"{type(e).__name__}: {e}"[:300]})
+                    continue
+                await self._apply(winner.agent, actions)
         finally:
             self._emit({"type": "status", "state": "idle"})
 
-    async def _speak(self, agent: Agent) -> None:
+    async def _speak(self, agent: Agent) -> Actions:
         message = Message(author=agent.name, text="")
         self._emit({"type": "stream_start", "id": message.id, "author": agent.name})
         transcript = list(self.messages)
+        actions = Actions()
+        finished = False
         try:
-            async for chunk in self.backend.speak(agent, self.agents, transcript):
+            async for chunk in self.backend.speak(agent, self.agents, transcript, self.whiteboard):
                 message.text += chunk
                 self._emit({"type": "stream_delta", "id": message.id, "text": chunk})
+            finished = True
         except asyncio.CancelledError:
             message.text = message.text.rstrip() + " — (interrupted)"
             raise
         finally:
+            if finished:  # never act on half a message (interrupted or provider error)
+                message.text, actions = extract_actions(message.text, agent.tools)
             message.text = message.text.strip()
             if message.text:
                 self.messages.append(message)
             self._emit({"type": "stream_end", "message": message.to_dict()})
+        return actions
+
+    async def _apply(self, agent: Agent, actions: Actions) -> None:
+        if actions.whiteboard is not None:
+            self.set_whiteboard(actions.whiteboard, by=agent.name)
+        for query in actions.searches:
+            if self.searcher is None:
+                text = f'Search is turned off on this server, so "{query}" was not searched.'
+            else:
+                self._emit({"type": "status", "state": "searching"})
+                try:
+                    text = format_results(query, await self.searcher.search(query))
+                except SearchError as e:
+                    text = f'Search for "{query}" failed: {e}'
+            self._append(Message(author=SEARCH_AUTHOR, text=text))

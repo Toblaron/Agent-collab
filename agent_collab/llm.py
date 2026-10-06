@@ -36,9 +36,11 @@ class Bid(BaseModel):
 
 
 class Backend(Protocol):
-    async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message]) -> Bid: ...
+    async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = "") -> Bid: ...
 
-    def speak(self, agent: Agent, roster: list[Agent], transcript: list[Message]) -> AsyncIterator[str]: ...
+    def speak(
+        self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = ""
+    ) -> AsyncIterator[str]: ...
 
 
 BID_INSTRUCTIONS = (
@@ -59,8 +61,12 @@ JSON_BID_SUFFIX = (
 SPEAK_INSTRUCTIONS = "Above is the conversation so far. It is your turn. Write only your next message, as {name}, with no name prefix."
 
 
-def _prompt(transcript: list[Message], instructions: str) -> str:
-    return f"<transcript>\n{render_transcript(transcript)}\n</transcript>\n\n{instructions}"
+def _prompt(transcript: list[Message], instructions: str, whiteboard: str = "") -> str:
+    board = whiteboard.strip() or "(empty)"
+    return (
+        f"<whiteboard>\n{board}\n</whiteboard>\n\n"
+        f"<transcript>\n{render_transcript(transcript)}\n</transcript>\n\n{instructions}"
+    )
 
 
 def _failed_bid(reason: str) -> Bid:
@@ -87,13 +93,13 @@ class ClaudeBackend:
             self._client = anthropic.AsyncAnthropic()
         return self._client
 
-    async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message]) -> Bid:
+    async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = "") -> Bid:
         try:
             response = await self.client.beta.messages.parse(
                 model=agent.model_id,
                 max_tokens=4000,
                 system=agent.system_prompt(roster),
-                messages=[{"role": "user", "content": _prompt(transcript, BID_INSTRUCTIONS.format(name=agent.name))}],
+                messages=[{"role": "user", "content": _prompt(transcript, BID_INSTRUCTIONS.format(name=agent.name), whiteboard)}],
                 output_format=Bid,
                 output_config={"effort": BID_EFFORT},
                 cache_control={"type": "ephemeral"},
@@ -106,12 +112,14 @@ class ClaudeBackend:
             return _failed_bid("(declined)")
         return _clamp(response.parsed_output)
 
-    async def speak(self, agent: Agent, roster: list[Agent], transcript: list[Message]) -> AsyncIterator[str]:
+    async def speak(
+        self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = ""
+    ) -> AsyncIterator[str]:
         async with self.client.beta.messages.stream(
             model=agent.model_id,
             max_tokens=16000,
             system=agent.system_prompt(roster),
-            messages=[{"role": "user", "content": _prompt(transcript, SPEAK_INSTRUCTIONS.format(name=agent.name))}],
+            messages=[{"role": "user", "content": _prompt(transcript, SPEAK_INSTRUCTIONS.format(name=agent.name), whiteboard)}],
             output_config={"effort": SPEAK_EFFORT},
             cache_control={"type": "ephemeral"},
             betas=[FALLBACK_BETA],
@@ -207,11 +215,11 @@ class OpenAICompatBackend:
         }
         return spec, body
 
-    async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message]) -> Bid:
+    async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = "") -> Bid:
         try:
             spec, body = self._request(
                 agent, roster,
-                _prompt(transcript, BID_INSTRUCTIONS.format(name=agent.name) + JSON_BID_SUFFIX),
+                _prompt(transcript, BID_INSTRUCTIONS.format(name=agent.name) + JSON_BID_SUFFIX, whiteboard),
                 temperature=0.2, max_tokens=1024,  # roomy enough for models that think out loud first
             )
             r = await self.client.post(f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec))
@@ -223,9 +231,11 @@ class OpenAICompatBackend:
             return _failed_bid(f"(error: {_describe(e)})")
         return parse_bid(content)
 
-    async def speak(self, agent: Agent, roster: list[Agent], transcript: list[Message]) -> AsyncIterator[str]:
+    async def speak(
+        self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = ""
+    ) -> AsyncIterator[str]:
         spec, body = self._request(
-            agent, roster, _prompt(transcript, SPEAK_INSTRUCTIONS.format(name=agent.name)),
+            agent, roster, _prompt(transcript, SPEAK_INSTRUCTIONS.format(name=agent.name), whiteboard),
             temperature=0.7, max_tokens=2048, stream=True,
         )
         think = ThinkFilter()
@@ -275,11 +285,13 @@ class RoutingBackend:
     def _for(self, agent: Agent) -> Backend:
         return self.claude if agent.provider == "anthropic" else self.compat
 
-    async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message]) -> Bid:
-        return await self._for(agent).bid(agent, roster, transcript)
+    async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = "") -> Bid:
+        return await self._for(agent).bid(agent, roster, transcript, whiteboard)
 
-    def speak(self, agent: Agent, roster: list[Agent], transcript: list[Message]) -> AsyncIterator[str]:
-        return self._for(agent).speak(agent, roster, transcript)
+    def speak(
+        self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = ""
+    ) -> AsyncIterator[str]:
+        return self._for(agent).speak(agent, roster, transcript, whiteboard)
 
 
 class MockBackend:
@@ -290,7 +302,7 @@ class MockBackend:
         self.rng = random.Random(seed)
         self.delay = delay
 
-    async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message]) -> Bid:
+    async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = "") -> Bid:
         await asyncio.sleep(self.delay)
         last = transcript[-1] if transcript else None
         if last and re.search(rf"@{re.escape(agent.name)}\b", last.text, re.IGNORECASE):
@@ -299,7 +311,9 @@ class MockBackend:
         decay = max(0.0, 1.0 - 0.2 * agent_turns)
         return Bid(urgency=round(self.rng.random() * decay, 2), reason="mock bid")
 
-    async def speak(self, agent: Agent, roster: list[Agent], transcript: list[Message]) -> AsyncIterator[str]:
+    async def speak(
+        self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = ""
+    ) -> AsyncIterator[str]:
         last = transcript[-1] if transcript else None
         others = [a.name for a in roster if a.name != agent.name]
         handoff = f" @{self.rng.choice(others)}, thoughts?" if others and self.rng.random() < 0.3 else ""
@@ -307,6 +321,13 @@ class MockBackend:
             f"As the {agent.role} (mock {agent.model_id}), responding to "
             f"{last.author if last else 'nobody'}: here's my take.{handoff}"
         )
-        for word in reply.split(" "):
+        # Exercise the tools when the human asks for them, so mock mode demos the whole UI.
+        asked = last.text.lower() if last and last.author == "Human" else ""
+        if "whiteboard" in asked and "whiteboard" in agent.tools:
+            board = whiteboard.strip() or "# Plan"
+            reply += f"\n```whiteboard\n{board}\n- [ ] {agent.name}: {agent.role} pass\n```"
+        if ("search" in asked or "look up" in asked) and "search" in agent.tools:
+            reply += f"\n[[search: {asked[:40].strip()}]]"
+        for i in range(0, len(reply), 6):
             await asyncio.sleep(self.delay)
-            yield word + " "
+            yield reply[i : i + 6]

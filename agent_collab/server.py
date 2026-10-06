@@ -14,7 +14,9 @@ from fastapi.responses import FileResponse
 from .agents import DEFAULT_ROSTER, Agent, AgentError
 from .llm import Backend, MockBackend, RoutingBackend
 from .providers import PROVIDERS, list_models
-from .room import Room
+from .room import HUMAN, Room
+from .search import Searcher, make_searcher
+from .teams import TeamError, TeamStore
 
 STATIC = Path(__file__).parent / "static"
 
@@ -35,14 +37,21 @@ def default_roster() -> list[Agent]:
     return [dataclasses.replace(a, provider=provider, model=model) for a in DEFAULT_ROSTER]
 
 
-def create_app(backend: Backend | None = None) -> FastAPI:
+_UNSET = object()
+
+
+def create_app(
+    backend: Backend | None = None, searcher: Searcher | None | object = _UNSET, teams: TeamStore | None = None
+) -> FastAPI:
     app = FastAPI(title="agent-collab")
     rooms: dict[str, Room] = {}
     shared_backend = backend or make_backend()
+    shared_searcher = make_searcher() if searcher is _UNSET else searcher
+    team_store = teams or TeamStore()
 
     def get_room(room_id: str) -> Room:
         if room_id not in rooms:
-            rooms[room_id] = Room(room_id, default_roster(), shared_backend)
+            rooms[room_id] = Room(room_id, default_roster(), shared_backend, searcher=shared_searcher)
         return rooms[room_id]
 
     @app.get("/")
@@ -56,6 +65,18 @@ def create_app(backend: Backend | None = None) -> FastAPI:
     @app.get("/api/providers")
     async def providers() -> list[dict]:
         return [p.to_dict() for p in PROVIDERS.values()]
+
+    @app.get("/api/config")
+    async def config() -> dict:
+        return {
+            "search": shared_searcher.name if shared_searcher else None,
+            "mock": isinstance(shared_backend, MockBackend),
+            "teams_dir": str(team_store.dir),
+        }
+
+    @app.get("/api/teams")
+    async def list_teams() -> list[dict]:
+        return team_store.list()
 
     @app.get("/api/providers/{provider_id}/models")
     async def provider_models(provider_id: str) -> dict:
@@ -91,8 +112,20 @@ def create_app(backend: Backend | None = None) -> FastAPI:
                         room.add_agent(data["agent"])
                     elif kind == "remove_agent":
                         room.remove_agent(str(data.get("name", "")))
-                except AgentError as e:
-                    # Only the sender needs to hear about their own invalid form input.
+                    elif kind == "set_whiteboard":
+                        room.set_whiteboard(str(data.get("text", "")), by=HUMAN)
+                    elif kind == "save_team":
+                        name = str(data.get("name", ""))
+                        team_store.save(name, room.agents)
+                        queue.put_nowait({"type": "teams", "teams": team_store.list(), "saved": name.strip()})
+                    elif kind == "load_team":
+                        name = str(data.get("name", ""))
+                        room.load_roster(team_store.load(name), label=name.strip())
+                    elif kind == "delete_team":
+                        team_store.delete(str(data.get("name", "")))
+                        queue.put_nowait({"type": "teams", "teams": team_store.list()})
+                except (AgentError, TeamError) as e:
+                    # Only the sender needs to hear about their own invalid input.
                     queue.put_nowait({"type": "agent_error", "text": str(e)})
         except WebSocketDisconnect:
             pass

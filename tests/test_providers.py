@@ -105,7 +105,7 @@ class Tagged(MockBackend):
         super().__init__(delay=0)
         self.tag = tag
 
-    async def bid(self, agent, roster, transcript):
+    async def bid(self, agent, roster, transcript, whiteboard=""):
         return Bid(urgency=0.5, reason=self.tag)
 
 
@@ -117,10 +117,10 @@ def test_routing_sends_each_agent_to_its_provider_backend():
 
 
 class BrokenSpeaker:
-    async def bid(self, agent, roster, transcript):
+    async def bid(self, agent, roster, transcript, whiteboard=""):
         return Bid(urgency=0.9 if agent.name == "Bad" else 0.6, reason="")
 
-    async def speak(self, agent, roster, transcript):
+    async def speak(self, agent, roster, transcript, whiteboard=""):
         if agent.name == "Bad":
             raise RuntimeError("model not found")
         yield "fine"
