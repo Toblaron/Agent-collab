@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import random
 import re
@@ -19,7 +20,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .actions import MAX_WHITEBOARD_CHARS, Actions, extract_actions
+from .actions import MAX_WHITEBOARD_CHARS, SEARCH, Actions, extract_actions
 from .agents import Agent, AgentError, Message, agent_from_dict
 from .llm import Backend, Bid
 from .search import SearchError, Searcher, format_results
@@ -57,11 +58,17 @@ class ScoredBid:
         }
 
 
-FAILED_BID_MARKERS = ("(rate limited)", "(provider busy)", "(error", "(too slow", "(Claude not installed)")
+# Bids that failed for a reason that fixes itself (worth waiting for) vs. one that won't.
+TEMPORARY_FAILURES = ("(rate limited)", "(provider busy)", "(too slow", "(error: timed out", "(error: can't connect")
+PERMANENT_FAILURES = ("(error", "(Claude not installed)", "(declined)", "(daily quota used up)")
 
 
 def _failed(bid: Bid) -> bool:
-    return bid.urgency == 0 and bid.reason.startswith(FAILED_BID_MARKERS)
+    return bid.urgency == 0 and bid.reason.startswith(TEMPORARY_FAILURES + PERMANENT_FAILURES)
+
+
+def _temporary(bid: Bid) -> bool:
+    return bid.urgency == 0 and bid.reason.startswith(TEMPORARY_FAILURES)
 
 
 def _mentions(name: str, text: str) -> re.Match | None:
@@ -92,6 +99,7 @@ class Room:
         self.updated_at = self.created_at
         self._subscribers: set[asyncio.Queue] = set()
         self._task: asyncio.Task | None = None
+        self._live: Message | None = None  # the reply being streamed right now (for clients that reconnect mid-reply)
         self._rng = random.Random()
 
     # ---- persistence ---------------------------------------------------
@@ -167,6 +175,7 @@ class Room:
             "whiteboard": self.whiteboard,
             "whiteboard_by": self.whiteboard_by,
             "search": self.searcher.name if self.searcher else None,
+            "live": self._live.to_dict() if self._live is not None else None,
         }
 
     # ---- control -------------------------------------------------------
@@ -315,7 +324,7 @@ class Room:
         async def bid_with_deadline(agent: Agent) -> Bid:
             try:
                 return await asyncio.wait_for(
-                    self.backend.bid(agent, self.agents, transcript, board), self.settings.bid_timeout
+                    self.backend.bid(self._as_prompted(agent), self.agents, transcript, board), self.settings.bid_timeout
                 )
             except asyncio.TimeoutError:
                 # A handoff ("@Bo, take a look") must not be lost just because Bo's provider is slow.
@@ -344,6 +353,11 @@ class Room:
                     first_nudge = nudge and turn == 0
                     self._emit({"type": "status", "state": "bidding"})
                     bids = await self.collect_bids(sitting_out, nudge=first_nudge)
+                    if bids and all(_failed(b.bid) for b in bids) and not any(_temporary(b.bid) for b in bids):
+                        # Bad keys / missing models: waiting won't help. Say what's wrong and stop.
+                        reasons = "; ".join(f"{b.agent.name}: {b.bid.reason.strip('()')}" for b in bids)
+                        self._emit({"type": "error", "agent": "room", "text": f"no agent could respond ({reasons}). Run `bash run.sh doctor` to check your keys."})
+                        break
                     for wait in self.settings.throttle_waits:
                         if not bids or not all(_failed(b.bid) for b in bids):
                             break
@@ -390,6 +404,13 @@ class Room:
         finally:
             self._emit({"type": "status", "state": "idle"})
 
+    def _as_prompted(self, agent: Agent) -> Agent:
+        """The agent as described to its model: never advertise a tool this server can't run
+        (e.g. web search when it's turned off), or the model will keep trying to use it."""
+        if self.searcher is None and SEARCH in agent.tools:
+            return dataclasses.replace(agent, tools=tuple(t for t in agent.tools if t != SEARCH))
+        return agent
+
     def _mentioned_agent(self, sitting_out: set[str]) -> Agent | None:
         """First agent @mentioned in the latest message (not its author, not benched)."""
         if not self.messages:
@@ -412,8 +433,9 @@ class Room:
         actions = Actions()
         finished = False
         started = time.monotonic()
+        self._live = message
         try:
-            async for chunk in self.backend.speak(agent, self.agents, transcript, self.whiteboard):
+            async for chunk in self.backend.speak(self._as_prompted(agent), self.agents, transcript, self.whiteboard):
                 message.text += chunk
                 self._emit({"type": "stream_delta", "id": message.id, "text": chunk})
             finished = True
@@ -421,6 +443,7 @@ class Room:
             message.text = message.text.rstrip() + " — (interrupted)"
             raise
         finally:
+            self._live = None
             message.meta["secs"] = round(time.monotonic() - started, 1)
             if finished:  # never act on half a message (interrupted or provider error)
                 message.text, actions = extract_actions(message.text, agent.tools)

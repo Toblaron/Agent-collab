@@ -301,13 +301,13 @@ def test_keys_env_flags_key_on_wrong_line(tmp_path, monkeypatch):
 
 
 def test_check_falls_back_past_retired_and_busy_models(monkeypatch):
-    """The real Gemini situation on 2026-10-06: default retired (404), flash busy (503), lite works."""
+    """Real Gemini behaviour seen on 2026-10-06: models listed but retired (404) or overloaded (503)."""
     from agent_collab import server
 
     monkeypatch.setenv("GEMINI_API_KEY", "AQ.test")
     listed = ["gemini-2.5-flash", "gemini-embedding-001", "gemini-flash-latest", "gemini-flash-lite-latest"]
     monkeypatch.setattr(server.httpx, "get", lambda *a, **k: httpx.Response(200, json={"data": [{"id": f"models/{m}"} for m in listed]}))
-    status = {"gemini-flash-latest": 503, "gemini-flash-lite-latest": 200, "gemini-2.5-flash": 404}
+    status = {"gemini-flash-lite-latest": 503, "gemini-flash-latest": 200, "gemini-2.5-flash": 404}
     probed = []
 
     def post(url, json, **k):
@@ -316,12 +316,12 @@ def test_check_falls_back_past_retired_and_busy_models(monkeypatch):
 
     monkeypatch.setattr(server.httpx, "post", post)
     c = server.check_provider("gemini")
-    assert (c.ok, c.model) == (True, "gemini-flash-lite-latest")
-    assert probed == ["gemini-flash-latest", "gemini-flash-lite-latest"]  # default first, embeddings never probed
+    assert (c.ok, c.model) == (True, "gemini-flash-latest")
+    assert probed == ["gemini-flash-lite-latest", "gemini-flash-latest"]  # default first, embeddings never probed
 
-    status["gemini-flash-lite-latest"] = 503
+    status["gemini-flash-latest"] = 503
     c = server.check_provider("gemini")
-    assert (c.ok, c.model) == (True, "gemini-flash-latest") and "busy" in c.note  # busy beats nothing
+    assert (c.ok, c.model) == (True, "gemini-flash-lite-latest") and "busy" in c.note  # busy beats nothing
 
     for m in status:
         status[m] = 404
@@ -391,3 +391,50 @@ def test_fast_start_skips_network(monkeypatch):
     checks = {c.id: c for c in server.check_providers(refresh=True)}
     assert checks["groq"].ok and checks["groq"].note == "not checked (fast start)"
     assert not checks["ollama"].ok
+
+
+def test_quota_vs_rate_limit_classification():
+    from agent_collab.llm import quota_used_up
+
+    daily = httpx.Response(429, text='{"error": {"message": "You exceeded your current quota... free_tier_requests, limit: 20"}}')
+    minute = httpx.Response(429, text='{"error": {"message": "Quota exceeded for metric x. Please retry in 41.2s."}}')
+    plain = httpx.Response(429, text='{"error": {"message": "Too many requests"}}')
+    assert quota_used_up(daily) and not quota_used_up(minute) and not quota_used_up(plain)
+    assert not quota_used_up(httpx.Response(503, text="quota"))
+
+
+def test_daily_quota_is_reported_not_retried(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(429, json={"error": {"message": "You exceeded your current quota (limit: 20)"}})
+
+    agent = Agent("Gem", "g", "", provider="gemini", model="gemini-x")
+    backend = OpenAICompatBackend(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    bid = run(backend.bid(agent, [agent], []))
+    assert bid.reason == "(daily quota used up)" and calls["n"] == 1  # no pointless retry
+
+    async def speak():
+        return "".join([t async for t in backend.speak(agent, [agent], [])])
+
+    with pytest.raises(Exception, match="used up for today.*\\[edit\\] on Gem"):
+        run(speak())
+
+
+def test_check_skips_models_with_used_up_quota(monkeypatch):
+    from agent_collab import server
+
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.setattr(server.httpx, "get", lambda *a, **k: httpx.Response(200, json={"data": [
+        {"id": "models/gemini-flash-lite-latest"}, {"id": "models/gemini-flash-latest"}]}))
+
+    def post(url, json, **k):
+        if json["model"] == "gemini-flash-lite-latest":
+            return httpx.Response(429, text='{"error":{"message":"You exceeded your current quota"}}')
+        return httpx.Response(200, json={"choices": []})
+
+    monkeypatch.setattr(server.httpx, "post", post)
+    c = server.check_provider("gemini")
+    assert (c.ok, c.model) == (True, "gemini-flash-latest") and "quota used up" in c.note

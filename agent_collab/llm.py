@@ -237,11 +237,11 @@ class OpenAICompatBackend:
             )
             for delay in (*self.RETRY_DELAYS[:1], None):  # bids are cheap: retry once, the room has a deadline
                 r = await self.client.post(f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec))
-                if r.status_code not in self.RETRYABLE or delay is None:
+                if r.status_code not in self.RETRYABLE or delay is None or quota_used_up(r):
                     break
                 await asyncio.sleep(delay)
             if r.status_code == 429:
-                return _failed_bid("(rate limited)")
+                return _failed_bid("(daily quota used up)" if quota_used_up(r) else "(rate limited)")
             if r.status_code == 503:
                 return _failed_bid("(provider busy)")
             r.raise_for_status()
@@ -262,10 +262,16 @@ class OpenAICompatBackend:
             async with self.client.stream(
                 "POST", f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec)
             ) as r:
+                if r.status_code >= 400:
+                    await r.aread()
+                if r.status_code == 429 and quota_used_up(r):
+                    raise ProviderError(
+                        f"{spec.label}'s free quota for {agent.model_id} is used up for today. "
+                        f"Use [edit] on {agent.name} to pick another model (each model has its own quota)."
+                    )
                 if r.status_code in self.RETRYABLE and delay is not None:
-                    await r.aread()
+                    pass  # wait and retry below
                 elif r.status_code >= 400:
-                    await r.aread()
                     raise ProviderError(f"{spec.label} returned {r.status_code}: {_error_text(r.text)}")
                 else:
                     async for chunk in self._stream_text(r, think):
@@ -294,6 +300,18 @@ class OpenAICompatBackend:
                     yield text
 
 
+def quota_used_up(r: httpx.Response) -> bool:
+    """A 429 that waiting a few seconds won't fix: a daily/monthly quota rather than a
+    per-minute rate limit. Per-minute limits tell you to retry in seconds; quotas don't."""
+    if r.status_code != 429:
+        return False
+    text = r.text.lower()
+    retry = re.search(r"retry in ([0-9.]+)\s*s", text)
+    if retry and float(retry.group(1)) <= 120:
+        return False
+    return any(k in text for k in ("quota", "per day", "perday", "daily", "credits", "billing"))
+
+
 def _error_text(body: str) -> str:
     """Pull the human-readable message out of a provider's JSON error body."""
     try:
@@ -306,9 +324,12 @@ def _error_text(body: str) -> str:
 
 def _describe(e: Exception) -> str:
     if isinstance(e, httpx.HTTPStatusError):
-        return f"HTTP {e.response.status_code}"
+        code = e.response.status_code
+        return {401: "key rejected", 403: "key not allowed", 404: "model not found"}.get(code, f"HTTP {code}")
     if isinstance(e, httpx.ConnectError):
         return "can't connect"
+    if isinstance(e, httpx.TimeoutException):
+        return "timed out"
     return type(e).__name__
 
 

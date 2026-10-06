@@ -103,7 +103,8 @@
   .line.search .body { color: var(--search); font-size: 12.5px; }
   .line.streaming .body::after { content: "█"; color: var(--bright); animation: blink .7s steps(1) infinite; }
   .md p { margin: 0 0 .55em; } .md p:last-child { margin-bottom: 0; }
-  .md h1, .md h2, .md h3, .md h4 { font-size: 1em; margin: .6em 0 .3em; color: var(--bright); }
+  .md h1, .md h2, .md h3, .md h4 { font-size: 1em; font-weight: 700; margin: .6em 0 .3em; color: var(--bright); text-shadow: var(--soft-glow); }
+  .md li > ul, .md li > ol { margin: .15em 0 .2em; }
   .md h1::before { content: "# "; opacity: .5; } .md h2::before { content: "## "; opacity: .5; } .md h3::before { content: "### "; opacity: .5; }
   .md ul, .md ol { margin: .2em 0 .55em; padding-left: 1.4em; }
   .md li { margin: .1em 0; }
@@ -148,9 +149,9 @@
   .tabs button.ping::after { content: " *"; color: var(--bright); }
   .pane { flex: 1; min-height: 0; padding: 14px; display: none; }
   .pane.on { display: block; }
-  .pane h2 { font-size: 12px; color: var(--muted); font-weight: 400; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
-  .pane h2 .right { margin-left: auto; display: flex; gap: 4px; }
-  .pane h2 button { font-size: 12px; }
+  .pane > h2 { font-size: 12px; color: var(--muted); font-weight: 400; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+  .pane > h2 .right { margin-left: auto; display: flex; gap: 4px; }
+  .pane > h2 button { font-size: 12px; }
 
   .agent { margin-bottom: 14px; font-size: 12.5px; }
   .agent .top { display: flex; gap: 8px; align-items: baseline; }
@@ -385,6 +386,10 @@ function inline(s) {
     .replace(/~~([^~\n]+)~~/g, "<del>$1</del>");
   return s.replace(/\u0000(\d+)\u0000/g, (_, i) => `<code>${esc(codes[+i])}</code>`);
 }
+function dedent(lines) {
+  const base = Math.min(...lines.filter(l => l.trim()).map(l => l.match(/^\s*/)[0].length));
+  return lines.map(l => l.slice(base)).join("\n");
+}
 function md(src) {
   const lines = String(src).replace(/\r/g, "").split("\n");
   let html = "", i = 0;
@@ -418,15 +423,19 @@ function md(src) {
       const start = ordered ? parseInt(li[1], 10) : 1;
       while (i < lines.length) {
         const m = lines[i].match(/^\s*([-*+]|\d+[.)])\s+(.*)$/);
-        if (m && /\d/.test(m[1]) === ordered) {
-          items.push([m[2].replace(/^\[( |x|X)\]\s/, (_, x) => (x.trim() ? "☑ " : "☐ "))]); i++;
-        } else if (!m && /^\s{2,}\S/.test(lines[i]) && items.length) {
-          items[items.length - 1].push(lines[i].trim()); i++;   // indented continuation of the item
+        const indented = /^\s{2,}\S/.test(lines[i]);
+        if (m && !indented && /\d/.test(m[1]) === ordered) {
+          items.push({ text: [m[2].replace(/^\[( |x|X)\]\s/, (_, x) => (x.trim() ? "☑ " : "☐ "))], sub: [] }); i++;
+        } else if (indented && items.length) {
+          // Indented lines belong to the item above: a nested list, or a continuation line.
+          const last = items[items.length - 1];
+          if (m || last.sub.length) last.sub.push(lines[i]); else last.text.push(lines[i].trim());
+          i++;
         } else break;
       }
       const tag = ordered ? "ol" : "ul";
       const attr = ordered && start !== 1 ? ` start="${start}"` : "";
-      html += `<${tag}${attr}>${items.map(x => `<li>${x.map(inline).join("<br>")}</li>`).join("")}</${tag}>`; continue;
+      html += `<${tag}${attr}>${items.map(x => `<li>${x.text.map(inline).join("<br>")}${x.sub.length ? md(dedent(x.sub)) : ""}</li>`).join("")}</${tag}>`; continue;
     }
     if (!line.trim()) { flush(); i++; continue; }
     para.push(line); i++;
@@ -823,7 +832,11 @@ function connect() {
         ev.messages.forEach(m => line(m.author, m.text, m));
         renderBoard(ev.whiteboard, ev.whiteboard_by);
         setStatus(ev.running ? "running" : "idle");
-        if (!ev.messages.length) showEmpty();
+        if (ev.live) {  // reconnected in the middle of a reply: show what's been said so far, keep streaming
+          const el = line(ev.live.author, "", { id: ev.live.id, meta: ev.live.meta });
+          el.classList.add("streaming"); el.querySelector(".body").textContent = ev.live.text; streaming[ev.live.id] = el;
+        }
+        if (!ev.messages.length && !ev.live) showEmpty();
         log.scrollTop = log.scrollHeight; updateJump();
         break;
       case "roster":
@@ -873,7 +886,11 @@ function connect() {
         break;
       }
       case "stream_end": {
-        const el = streaming[ev.message.id]; if (!el) break;
+        const el = streaming[ev.message.id];
+        if (!el) {  // never saw this reply start (e.g. reconnected): still show the finished message
+          if (ev.message.text) { line(ev.message.author, ev.message.text, ev.message); bumpUnread(ev.message.author); }
+          break;
+        }
         delete streaming[ev.message.id];
         el.classList.remove("streaming");
         if (!ev.message.text) { el.remove(); break; }

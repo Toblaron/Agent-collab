@@ -279,3 +279,67 @@ def test_transcript_window_keeps_prompts_small():
     assert "91 earlier messages not shown" in text
     assert "[Human]: m90" not in text and "[Human]: m91" in text
     assert text.endswith("…(truncated)") and len(text) < 6000
+
+
+def test_permanent_failures_do_not_trigger_rate_limit_waits():
+    class BadKeys(Scripted):
+        async def bid(self, agent, roster, transcript, whiteboard=""):
+            return Bid(urgency=0.0, reason="(error: key rejected)")
+
+    async def go():
+        room = Room("r", [A, B], BadKeys(), RoomSettings(max_agent_turns=3, throttle_waits=(30.0,)))
+        q = room.subscribe()
+        start = asyncio.get_event_loop().time()
+        await room.post_human("hi")
+        await room.wait_idle()
+        events = [q.get_nowait() for _ in range(q.qsize())]
+        return events, asyncio.get_event_loop().time() - start
+
+    events, elapsed = run(go())
+    assert elapsed < 1  # did not sit through the 30s rate-limit wait
+    err = next(e for e in events if e["type"] == "error")
+    assert "key rejected" in err["text"] and "doctor" in err["text"]
+
+
+def test_snapshot_includes_reply_in_progress():
+    class Slow(Scripted):
+        async def speak(self, agent, roster, transcript, whiteboard=""):
+            yield "half a "
+            await asyncio.sleep(0.2)
+            yield "thought"
+
+    async def go():
+        room = Room("r", [A], Slow(urgency={"A": 0.9}), RoomSettings(max_agent_turns=1))
+        await room.post_human("hi")
+        await asyncio.sleep(0.05)
+        mid = room.snapshot()["live"]
+        await room.wait_idle()
+        return mid, room.snapshot()["live"]
+
+    mid, after = run(go())
+    assert mid["author"] == "A" and mid["text"] == "half a " and after is None
+
+
+def test_agents_are_not_told_about_search_when_it_is_off():
+    seen = []
+
+    class Recorder(Scripted):
+        async def speak(self, agent, roster, transcript, whiteboard=""):
+            seen.append(agent.system_prompt(roster))
+            yield "ok"
+
+    async def go(searcher):
+        room = Room("r", [A], Recorder(urgency={"A": 0.9}), RoomSettings(max_agent_turns=1), searcher=searcher)
+        await room.post_human("hi")
+        await room.wait_idle()
+
+    class S:
+        name = "s"
+
+        async def search(self, q):
+            return []
+
+    run(go(None))
+    run(go(S()))
+    assert "[[search:" not in seen[0] and "```whiteboard" in seen[0]
+    assert "[[search:" in seen[1]

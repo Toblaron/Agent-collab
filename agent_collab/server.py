@@ -19,7 +19,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 
 from .agents import DEFAULT_ROSTER, EXTRA_ROSTER, Agent, AgentError
-from .llm import Backend, MockBackend, RoutingBackend
+from .llm import Backend, MockBackend, RoutingBackend, quota_used_up
 from .providers import PROVIDERS, auth_headers, list_models
 from .room import HUMAN, Room
 from .rooms import RoomStore, export_markdown, valid_room_id
@@ -41,7 +41,7 @@ AUTO_ORDER = ("gemini", "groq", "openrouter", "mistral", "huggingface", "anthrop
 # When a provider's default model has disappeared from its live list (free catalogues churn),
 # pick a replacement whose id contains one of these hints, skipping non-chat models.
 MODEL_HINTS = {
-    "gemini": ("flash-latest", "flash-lite-latest", "flash", "pro"),
+    "gemini": ("flash-lite-latest", "flash-lite", "flash-latest", "flash", "pro"),
     "groq": ("llama-3.3", "llama", "qwen", "gemma"),
     "openrouter": (":free",),
     "mistral": ("small", "medium", "large"),
@@ -143,6 +143,9 @@ def check_provider(pid: str, budget: float = CHECK_DEADLINE) -> ProviderCheck:
             return ProviderCheck(pid, True, model, note)
         if status in (401, 403):
             return ProviderCheck(pid, False, None, f"key rejected (HTTP {status}): check {spec.key_env} in keys.env")
+        if status == 429 and quota_used_up(httpx.Response(429, text=body)):
+            tried.append(f"{model} (daily quota used up)")
+            continue
         if status in (429, 503) and busy is None:
             busy = model  # works, just busy/limited right now; keep looking for one that answers
         tried.append(model)

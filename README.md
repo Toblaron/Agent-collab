@@ -123,6 +123,26 @@ because they're plain-text markers the room parses after an agent finishes speak
 `AGENT_COLLAB_SEARCH=auto` (default) picks the first configured of Tavily → Brave → SearXNG →
 DuckDuckGo. Force one with `AGENT_COLLAB_SEARCH=brave` etc., or `off`.
 
+## Rooms, history & everyday use
+
+- **Everything is saved.** Each room's conversation, whiteboard, team, muted agents and turn
+  limit live in `~/.agent-collab/rooms/<room>.json` and come back after a restart. Empty rooms
+  aren't saved. **ROOMS** tab: open, export or delete rooms, or start a new one.
+- **Export** (`[export]` or `/export`): the conversation plus final whiteboard as Markdown.
+- **[▶ continue]**: give the agents another round when the room has gone quiet or hit the
+  turn limit, without typing anything.
+- **Agents**: `[edit]` an agent in place (model, persona, tools, even name), `[mute]` to bench
+  it without removing it, and set *agent turns per message* (1–50).
+- **Commands** (type `/` for the list): `/continue /stop /clear /export /new [name]
+  /room name /mute name /unmute name /turns N /board /theme /rain /help`. Start a message
+  with `//` to send a literal slash.
+- **@mentions** autocomplete as you type and hand the floor straight to that agent.
+- Replies render Markdown (lists, tables, code, links), show the model and response time,
+  and have a copy button. Visible scrollbars everywhere (including phones, where the browser's
+  own are invisible), a jump-to-latest button, and an unread count in the tab title.
+- Keys: `Enter` send, `Shift+Enter` newline, `Esc` stop the agents, `/` focus the input.
+- Long rooms stay fast: agents see the latest 40 messages plus the whiteboard.
+
 ## Saved teams
 
 TEAMS tab → name it → `[save]` stores the room's current roster (names, roles, personas,
@@ -162,17 +182,23 @@ agent_collab/
   teams.py     Saved-team store (JSON files)
   providers.py Provider table (Claude, Ollama, Groq, Gemini, OpenRouter, HF, Mistral, custom)
   llm.py       ClaudeBackend, OpenAICompatBackend, RoutingBackend, MockBackend
-  room.py      Room: bidding, speaking, tools, whiteboard, interruption, pub/sub
+  room.py      Room: bidding, speaking, tools, whiteboard, mute/continue/clear, pub/sub
+  rooms.py     Saved rooms (JSON per room) + Markdown export
   server.py    FastAPI app: GET /, /healthz, /api/{config,teams,providers[/{id}/models]}, WS /ws/{room}
   static/      Single-file terminal UI (no build step)
 tests/         Turn-taking, providers, tools, search parsers, teams, WebSocket (no network)
 ```
 
-WebSocket protocol — client sends `say`, `stop`, `add_agent` (`{"agent": {name, role, provider,
-model, persona, color, tools}}`), `remove_agent`, `set_whiteboard` (`{"text"}`), `save_team`,
-`load_team`, `delete_team` (`{"name"}`); server emits `history`, `roster`, `message`, `status`,
-`bids`, `stream_start`, `stream_delta`, `stream_end`, `whiteboard`, `teams`, `notice`, `error`
-(an agent's provider failed) and `agent_error` (invalid request, sent only to the requester).
+HTTP: `GET /api/rooms`, `GET /api/rooms/{id}/export.md`, `DELETE /api/rooms/{id}`,
+`GET /api/teams`, `GET /api/providers[/{id}/models]`, `GET /api/config`.
+
+WebSocket `/ws/{room}`: client sends `say`, `stop`, `continue`, `clear`, `add_agent` /
+`update_agent` (`{"name", "agent": {name, role, provider, model, persona, color, tools}}`),
+`remove_agent`, `set_muted` (`{"name", "muted"}`), `set_max_turns` (`{"value"}`),
+`set_whiteboard` (`{"text"}`), `save_team` / `load_team` / `delete_team` (`{"name"}`).
+Server emits `history` (includes any reply still streaming, for reconnects), `roster`,
+`settings`, `message`, `status`, `bids`, `stream_start` / `stream_delta` / `stream_end`,
+`whiteboard`, `teams`, `notice`, `error`, `deleted`, and `agent_error` (sender only).
 
 ## Customising the team
 
@@ -183,7 +209,7 @@ Add agents from the UI, or edit `DEFAULT_ROSTER` in `agents.py` (each `Agent` ta
 
 - Separate bid model per agent (e.g. bid on a small local model, speak on a big one)
 - More tools: sandboxed code execution, fetch-a-URL
-- Persist rooms and transcripts (SQLite) across server restarts
+- Automatic model fallback when a free model's daily quota runs out mid-conversation
 - Private side-channels (agent ↔ agent DMs) and a task board agents can claim items from
 - Long-room context management (compaction / rolling summary)
 
