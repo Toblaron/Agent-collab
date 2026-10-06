@@ -147,7 +147,10 @@ MODEL_HINTS = {
     "gemini": ("flash-lite-latest", "flash-lite", "flash-latest", "flash", "pro"),
     "groq": ("llama-3.3", "gpt-oss-120b", "llama", "gpt-oss", "qwen", "gemma"),
     "openai": ("gpt-5-mini", "gpt-5.1-mini", "gpt-4.1-mini", "gpt-4o-mini", "mini", "gpt-5", "gpt-4.1"),
-    "openrouter": (":free",),
+    # Well-known free families first; otherwise the first `:free` id alphabetically wins, which is
+    # usually an obscure model. gpt-oss sits after the others because Groq already serves it.
+    "openrouter": ("llama-3.3-70b-instruct", "deepseek/", "qwen/", "google/gemma", "mistralai/", "meta-llama/",
+                   "gpt-oss-120b", ""),
     "mistral": ("small", "medium", "large"),
     "huggingface": ("instruct", "chat"),
     "custom": ("",),
@@ -157,10 +160,17 @@ NOT_CHAT = ("embed", "tts", "audio", "whisper", "image", "vision-only", "guard",
             "realtime", "dall-e", "davinci", "babbage", "sora", "search", "computer-use", "codex", "deep-research")
 
 
+def _chat_models(pid: str, ids: list[str]) -> list[str]:
+    chat = [i for i in ids if not any(bad in i.lower() for bad in NOT_CHAT)]
+    if pid == "openrouter":  # only the free variants: everything else bills your OpenRouter credit
+        chat = [i for i in chat if i.endswith(":free")]
+    return chat
+
+
 def pick_model(pid: str, default: str, ids: list[str]) -> str:
     if not ids or default in ids:
         return default
-    chat = [i for i in ids if not any(bad in i.lower() for bad in NOT_CHAT)] or ids
+    chat = _chat_models(pid, ids) or ids
     for hint in MODEL_HINTS.get(pid, ("",)):
         matches = [i for i in chat if hint in i.lower()]
         if matches:
@@ -170,7 +180,7 @@ def pick_model(pid: str, default: str, ids: list[str]) -> str:
 
 def candidate_models(pid: str, default: str, ids: list[str]) -> list[str]:
     """Models worth trying, best first: the default, then listed chat models matching the hints."""
-    chat = [i for i in ids if not any(bad in i.lower() for bad in NOT_CHAT)]
+    chat = _chat_models(pid, ids)
     out = [default] if (not ids or default in ids) else []
     for hint in MODEL_HINTS.get(pid, ("",)):
         out += [i for i in chat if hint in i.lower() and i not in out]

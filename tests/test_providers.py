@@ -697,3 +697,28 @@ def test_gpt_oss_seat_follows_what_the_host_lists(monkeypatch):
     assert [a.model_id for a in team] == ["llama-3.3-70b-versatile"] * 3 + ["openai/gpt-oss-120b"]
     monkeypatch.setenv("AGENT_COLLAB_DEFAULT_MODEL", "qwen-x")  # an explicit model wins for everyone
     assert {a.model_id for a in server.default_roster()} == {"qwen-x"}
+
+
+def test_openrouter_prefers_known_free_models_over_alphabetical():
+    from agent_collab.providers import candidate_models, pick_model
+
+    ids = ["apodex/apodex-1.1-mini:free", "deepseek/deepseek-chat", "deepseek/deepseek-chat-v3.1:free",
+           "openai/gpt-oss-120b:free", "qwen/qwen3-235b:free", "zz/obscure:free"]
+    assert pick_model("openrouter", "meta-llama/llama-3.3-70b-instruct:free", ids) == "deepseek/deepseek-chat-v3.1:free"
+    cands = candidate_models("openrouter", "meta-llama/llama-3.3-70b-instruct:free", ids)
+    assert "deepseek/deepseek-chat" not in cands  # paid variant never offered
+    assert cands[:3] == ["deepseek/deepseek-chat-v3.1:free", "qwen/qwen3-235b:free", "openai/gpt-oss-120b:free"]
+    assert cands[-1] == "zz/obscure:free"  # unknown free models still count, just last
+
+
+def test_check_note_names_the_retired_default(monkeypatch):
+    import httpx
+
+    from agent_collab import server
+
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: httpx.Response(200, json={"data": [{"id": "openai/gpt-oss-120b"}]}))
+    monkeypatch.setattr(server, "probe_chat", lambda spec, model, timeout=12.0: (200, "{}"))
+    check = server.check_provider("groq")
+    assert check.ok and check.model == "openai/gpt-oss-120b"
+    assert check.note == "ok (using openai/gpt-oss-120b; llama-3.3-70b-versatile is no longer offered)"

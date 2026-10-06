@@ -106,7 +106,12 @@ def check_provider(pid: str, budget: float = CHECK_DEADLINE) -> ProviderCheck:
             break
         status, body = probe_chat(spec, model, timeout=min(12.0, remaining))
         if status == 200:
-            note = "ok" if model == spec.default_model else f"ok (using {model}; {', '.join(tried)} unavailable)"
+            if model == spec.default_model:
+                note = "ok"
+            elif tried:
+                note = f"ok (using {model}; {', '.join(tried)} unavailable)"
+            else:
+                note = f"ok (using {model}; {spec.default_model} is no longer offered)"
             return ProviderCheck(pid, True, model, models=tuple(ids), note=note)
         if status in (401, 403):
             return ProviderCheck(pid, False, None, f"key rejected (HTTP {status}): check {spec.key_env} in keys.env")
