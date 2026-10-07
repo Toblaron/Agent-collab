@@ -80,6 +80,7 @@
   button:disabled { opacity: .4; cursor: not-allowed; }
   button.ghost { border-color: transparent; color: var(--muted); padding: 2px 5px; }
   button.ghost:hover:not(:disabled) { background: transparent; color: var(--bright); }
+  button.earlier { display: block; margin: 4px auto 10px; }
   input, textarea, select { font: inherit; color: var(--text); background: var(--panel-solid);
            border: 1px solid var(--border); padding: 6px 8px; width: 100%; border-radius: 0; }
   input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); box-shadow: var(--soft-glow); }
@@ -628,7 +629,7 @@ function avatarSrc(author) {
 }
 function avatarImg(author, extra = "") {
   const img = document.createElement("img");
-  img.className = "av" + (extra ? " " + extra : ""); img.alt = ""; img.dataset.author = author;
+  img.className = "av" + (extra ? " " + extra : ""); img.alt = ""; img.dataset.author = author; img.decoding = "async";
   img.src = avatarSrc(author);
   if (/^data:image\/(png|jpeg|webp|gif)/.test(img.src)) img.classList.add("photo");
   return img;
@@ -675,9 +676,11 @@ $("meClear").onclick = () => { store.set("ac-avatar", ""); refreshAvatars(); };
 function stamp(ts) { return new Date((ts || Date.now() / 1000) * 1000).toTimeString().slice(0, 8); }
 function shortModel(m) { return (m || "").split("/").pop(); }
 
-function line(author, text, { id, ts, meta } = {}) {
-  $("empty")?.remove();
-  const wasAtBottom = atBottom();
+// `into`: build off-screen (a DocumentFragment) without measuring the log: rendering a long
+// history one measured line at a time forces a full re-layout per message and froze phones.
+function line(author, text, { id, ts, meta } = {}, into = null) {
+  if (!into) $("empty")?.remove();
+  const wasAtBottom = into ? false : atBottom();
   const el = document.createElement("div");
   el.className = "line" + (author === "Human" ? " human" : author === "Search" ? " search" : "");
   el.dataset.author = author;
@@ -708,9 +711,35 @@ function line(author, text, { id, ts, meta } = {}) {
   el.dataset.raw = text;
   if (text) renderBody(body, text);
   el.append(head, body);
+  if (into) { into.append(el); return el; }
   log.append(el);
   stick(wasAtBottom);
   return el;
+}
+
+// Long rooms open with only the latest messages drawn; older ones load on request.
+const HISTORY_PAGE = 100;
+function renderHistory(messages) {
+  const shown = messages.slice(-HISTORY_PAGE), hidden = messages.slice(0, -HISTORY_PAGE);
+  const frag = document.createDocumentFragment();
+  if (hidden.length) frag.append(earlierButton(hidden));
+  shown.forEach(m => line(m.author, m.text, m, frag));
+  log.append(frag);
+}
+function earlierButton(hidden) {
+  const btn = document.createElement("button");
+  btn.type = "button"; btn.className = "ghost earlier";
+  btn.textContent = `[↑ show ${hidden.length} earlier message${hidden.length === 1 ? "" : "s"}]`;
+  btn.onclick = () => {
+    const page = hidden.slice(-HISTORY_PAGE), rest = hidden.slice(0, -HISTORY_PAGE);
+    const frag = document.createDocumentFragment();
+    if (rest.length) frag.append(earlierButton(rest));
+    page.forEach(m => line(m.author, m.text, m, frag));
+    const before = log.scrollHeight;
+    btn.replaceWith(frag);
+    log.scrollTop += log.scrollHeight - before;  // keep the reader's place
+  };
+  return btn;
 }
 
 function sys(text, cls, action) {
@@ -922,6 +951,23 @@ function exportRoom(id = roomId) { location.href = `/api/rooms/${encodeURICompon
 $("exportBtn").onclick = () => exportRoom();
 $("continueBtn").onclick = () => send({ type: "continue" });
 
+// Tokens arrive many per frame: add them once per frame, measuring the log once, instead of a
+// full re-layout per token (which made long rooms unresponsive while an agent was typing).
+const pendingText = {};
+let flushQueued = false;
+function flushDeltas() {
+  flushQueued = false;
+  const ids = Object.keys(pendingText);
+  if (!ids.length) return;
+  const wasAtBottom = atBottom();
+  for (const id of ids) {
+    const el = streaming[id];
+    if (el) el.querySelector(".body").textContent += pendingText[id];
+    delete pendingText[id];
+  }
+  if (wasAtBottom) log.scrollTop = log.scrollHeight; else updateJump();
+}
+
 // ---------- websocket ----------
 let ws, retry = 0;
 function send(obj) {
@@ -936,13 +982,14 @@ function connect() {
     switch (ev.type) {
       case "history":
         log.innerHTML = ""; lastBids = { bids: [], winner: null };
+        for (const k in pendingText) delete pendingText[k];
         for (const k in streaming) delete streaming[k];
         renderAgents(ev.agents, ev.muted);
         $("maxTurns").value = ev.max_turns;
         roomTitle = ev.title || roomId;
         $("roomLabel").textContent = `#${roomId}` + (roomTitle !== roomId ? ` · ${roomTitle}` : "");
         updateTitle();
-        ev.messages.forEach(m => line(m.author, m.text, m));
+        renderHistory(ev.messages);
         renderBoard(ev.whiteboard, ev.whiteboard_by);
         setStatus(ev.running ? "running" : "idle");
         if (ev.live) {  // reconnected in the middle of a reply: show what's been said so far, keep streaming
@@ -993,12 +1040,13 @@ function connect() {
         break;
       }
       case "stream_delta": {
-        const el = streaming[ev.id]; if (!el) break;
-        const wasAtBottom = atBottom(); el.querySelector(".body").textContent += ev.text;
-        if (wasAtBottom) log.scrollTop = log.scrollHeight; else updateJump();
+        if (!streaming[ev.id]) break;
+        pendingText[ev.id] = (pendingText[ev.id] || "") + ev.text;
+        if (!flushQueued) { flushQueued = true; requestAnimationFrame(flushDeltas); }
         break;
       }
       case "stream_end": {
+        flushDeltas();
         const el = streaming[ev.message.id];
         if (!el) {  // never saw this reply start (e.g. reconnected): still show the finished message
           if (ev.message.text) { line(ev.message.author, ev.message.text, ev.message); bumpUnread(ev.message.author); }
