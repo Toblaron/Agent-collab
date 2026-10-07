@@ -425,7 +425,11 @@ function md(src) {
   let html = "", i = 0;
   const para = [];
   const flush = () => { if (para.length) { html += `<p>${para.map(inline).join("<br>")}</p>`; para.length = 0; } };
+  // Safety net: every branch below advances `i`; if one ever doesn't, show the rest as plain
+  // text instead of hanging the page (a renderer loop once froze rooms on load).
+  let guard = lines.length * 4 + 16;
   while (i < lines.length) {
+    if (--guard < 0) { flush(); html += `<p>${esc(lines.slice(i).join("\n"))}</p>`; break; }
     const line = lines[i];
     const fence = line.match(/^\s*```(.*)$/);
     if (fence) {
@@ -451,10 +455,13 @@ function md(src) {
     if (li) {
       flush(); const ordered = /\d/.test(li[1]); const items = [];
       const start = ordered ? parseInt(li[1], 10) : 1;
+      const base = line.match(/^\s*/)[0].length;  // a list may itself be indented: depth is relative to it
       while (i < lines.length) {
         const m = lines[i].match(/^\s*([-*+]|\d+[.)])\s+(.*)$/);
-        const indented = /^\s{2,}\S/.test(lines[i]);
-        if (m && !indented && /\d/.test(m[1]) === ordered) {
+        const indented = /\S/.test(lines[i]) && lines[i].match(/^\s*/)[0].length >= base + 2;
+        // The first item is taken however it's indented (an indented first item used to match
+        // nothing here, leaving `i` unchanged: an endless loop that froze the page on load).
+        if (m && (!indented || !items.length) && /\d/.test(m[1]) === ordered) {
           items.push({ text: [m[2].replace(/^\[( |x|X)\]\s/, (_, x) => (x.trim() ? "☑ " : "☐ "))], sub: [] }); i++;
         } else if (indented && items.length) {
           // Indented lines belong to the item above: a nested list, or a continuation line.
