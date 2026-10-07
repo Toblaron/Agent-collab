@@ -25,6 +25,8 @@ MAX_SEARCHES_PER_MESSAGE = 2
 
 # Unterminated fence (model hit max_tokens mid-block) still counts: take everything to the end.
 WHITEBOARD_RE = re.compile(r"```[ \t]*whiteboard[^\n]*\n(.*?)(?:\n?```|\Z)", re.DOTALL | re.IGNORECASE)
+# Some models echo the prompt's own <whiteboard>…</whiteboard> wrapper instead of using the fence.
+WHITEBOARD_TAG_RE = re.compile(r"<whiteboard>\s*\n?(.*?)(?:</whiteboard>|\Z)", re.DOTALL | re.IGNORECASE)
 SEARCH_RE = re.compile(r"\[\[\s*search\s*:\s*(.+?)\s*\]\]", re.IGNORECASE)
 
 
@@ -44,6 +46,11 @@ def extract_actions(text: str, tools: tuple[str, ...]) -> tuple[str, Actions]:
         if blocks:
             actions.whiteboard = blocks[-1].strip()[:MAX_WHITEBOARD_CHARS]
             text = WHITEBOARD_RE.sub("[updated the whiteboard]", text)
+        tagged = WHITEBOARD_TAG_RE.findall(text)
+        if tagged:
+            if actions.whiteboard is None:
+                actions.whiteboard = tagged[-1].strip()[:MAX_WHITEBOARD_CHARS]
+            text = WHITEBOARD_TAG_RE.sub("[updated the whiteboard]", text)
 
     if SEARCH in tools:
         def take(match: re.Match) -> str:

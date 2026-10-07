@@ -100,6 +100,12 @@ How non-Claude agents work:
   one per second, so it's paced from the start); any provider that answers "429 slow down" is
   automatically slowed further, honouring `Retry-After`, then eased back. A rate-limited speaker
   gets a second try after a short pause instead of being skipped.
+- **Getting the code out.** Agents only chat: they can't run code, touch files or push to GitHub,
+  and they're told so (and told never to claim otherwise). **[⇩ code]** (or `/code`, or the button
+  on a room in the Rooms tab) downloads every code block the team wrote as a zip of real files,
+  named from comments like `// Entity.cs`; a later version of a file replaces the earlier one.
+- **No echo loops.** A reply that's nearly the same as one of the speaker's last three messages
+  is dropped with a notice, so a small model can't flood the room with one idea.
 - **Small token limits.** Some free models cap how many tokens one request may use (Groq's
   `gpt-oss-120b`: 8,000 per minute, reply included). Requests to Groq are trimmed to fit up
   front, and if any provider answers "request too large", the agent learns that model's limit,

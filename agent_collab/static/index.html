@@ -262,6 +262,7 @@
     <div class="hbtns">
       <button type="button" class="ghost" id="continueBtn" title="Give the agents another round (/continue)">[▶<span class="long"> continue</span>]</button>
       <button type="button" class="ghost wide" id="exportBtn" title="Download this conversation as Markdown (/export)">[export]</button>
+      <button type="button" class="ghost wide" id="codeBtn" title="Download every code file the team wrote, as a zip (/code)">[⇩ code]</button>
       <button type="button" class="ghost wide" id="rainBtn" title="Toggle digital rain">[rain]</button>
       <button type="button" class="ghost" id="themeBtn" title="Toggle theme">[◐<span class="long"> theme</span>]</button>
     </div>
@@ -930,14 +931,16 @@ async function refreshRooms() {
     const card = document.createElement("div");
     card.className = "card" + (r.id === roomId ? " current" : "");
     card.innerHTML = `<div class="tname"></div><div class="tmeta"></div>
-      <div class="row"><button type="button">[open]</button><button type="button" class="ghost">[export]</button><button type="button" class="ghost">[delete]</button></div>`;
+      <div class="row"><button type="button">[open]</button><button type="button" class="ghost">[export]</button><button type="button" class="ghost">[⇩ code]</button><button type="button" class="ghost">[delete]</button></div>`;
     card.querySelector(".tname").textContent = `#${r.id} · ${r.title}`;
     card.querySelector(".tmeta").textContent = `${r.messages} messages · ${r.agents.join(", ")} · ${ago(r.updated_at)}${r.running ? " · running" : ""}`;
-    const [open, exp, del] = card.querySelectorAll("button");
+    const [open, exp, code, del] = card.querySelectorAll("button");
     open.textContent = r.id === roomId ? "[here]" : "[open]";
     open.onclick = () => goRoom(r.id);
     exp.disabled = !r.messages;
     exp.onclick = () => exportRoom(r.id);
+    code.disabled = !r.messages;
+    code.onclick = () => exportCode(r.id);
     del.onclick = async () => {
       if (!confirm(`Delete room #${r.id} and its whole conversation? This can't be undone.`)) return;
       await fetch(`/api/rooms/${encodeURIComponent(r.id)}`, { method: "DELETE" });
@@ -956,6 +959,19 @@ $("newRoomBtn").onclick = () => newRoom($("newRoom").value);
 $("newRoom").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); newRoom($("newRoom").value); } });
 function exportRoom(id = roomId) { location.href = `/api/rooms/${encodeURIComponent(id)}/export.md`; }
 $("exportBtn").onclick = () => exportRoom();
+// The team's code blocks as real files (named from their `// File.cs` comments), zipped.
+async function exportCode(id = roomId) {
+  try {
+    const r = await fetch(`/api/rooms/${encodeURIComponent(id)}/code.zip`);
+    if (r.status === 404) { toast("no code in this room yet"); return; }
+    if (!r.ok) { toast(`code export failed (HTTP ${r.status})`); return; }
+    const url = URL.createObjectURL(await r.blob());
+    const a = Object.assign(document.createElement("a"), { href: url, download: `${id}-code.zip` });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } catch { toast("code export failed: is the server running?"); }
+}
+$("codeBtn").onclick = () => exportCode();
 $("continueBtn").onclick = () => send({ type: "continue" });
 
 // Tokens arrive many per frame: add them once per frame, measuring the log once, instead of a
@@ -1095,6 +1111,7 @@ const COMMANDS = [
   ["/stop", "stop the agents"],
   ["/clear", "wipe this room's chat and whiteboard (team stays)"],
   ["/export", "download the conversation as Markdown"],
+  ["/code", "download all code the team wrote, as a zip of files"],
   ["/new", "start a new room: /new [name]"],
   ["/room", "switch room: /room name"],
   ["/mute", "bench an agent: /mute name"],
@@ -1115,6 +1132,7 @@ function runCommand(text) {
     case "/stop": send({ type: "stop" }); break;
     case "/clear": if (confirm("Clear this room's conversation and whiteboard? The team stays.")) send({ type: "clear" }); break;
     case "/export": exportRoom(); break;
+    case "/code": exportCode(); break;
     case "/new": newRoom(arg); break;
     case "/room": if (need("name")) newRoom(arg); break;
     case "/mute": if (need("name")) send({ type: "set_muted", name: arg.replace(/^@/, ""), muted: true }); break;

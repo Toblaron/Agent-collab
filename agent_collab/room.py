@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import difflib
 import logging
 import random
 import re
@@ -37,6 +38,9 @@ MAX_TURNS_LIMIT = 50
 # After a speaker fails, the best remaining bid only needs this much to cover for them
 # (otherwise everyone politely waits for the missing agent and the room falls silent).
 COVER_THRESHOLD = 0.15
+# A reply this similar to one of the author's last few messages is dropped as a repeat.
+REPEAT_SIMILARITY = 0.7
+REPEAT_LOOKBACK = 3
 
 
 @dataclass
@@ -111,6 +115,7 @@ class Room:
         self._task: asyncio.Task | None = None
         self._live: Message | None = None  # the reply being streamed right now (for clients that reconnect mid-reply)
         self._rng = random.Random()
+        self._repeated = False  # the last reply was dropped as a near-repeat
 
     # ---- persistence ---------------------------------------------------
 
@@ -459,7 +464,8 @@ class Room:
                     # An empty reply would leave the room unchanged and the same agent could win
                     # again and again; bench them for the rest of this round instead.
                     sitting_out.add(winner.agent.name)
-                    self._emit({"type": "notice", "text": f"{winner.agent.name} had nothing to say"})
+                    why = "repeated an earlier message (skipped)" if self._repeated else "had nothing to say"
+                    self._emit({"type": "notice", "text": f"{winner.agent.name} {why}"})
                     continue
                 await self._apply(winner.agent, actions)
             else:
@@ -576,11 +582,22 @@ class Room:
             if finished:  # never act on half a message (interrupted or provider error)
                 message.text, actions = extract_actions(message.text, agent.tools)
             message.text = message.text.strip()
+            self._repeated = finished and self._is_repeat(agent.name, message.text)
+            if self._repeated:  # small models loop on one idea; don't let it flood the room
+                message.text = ""
+                actions = Actions()
             if message.text:
                 self.messages.append(message)
                 self._changed()
             self._emit({"type": "stream_end", "message": message.to_dict()})
         return actions, bool(message.text)
+
+    def _is_repeat(self, author: str, text: str) -> bool:
+        """Is this (nearly) one of the author's last few messages again?"""
+        if len(text) < 80:
+            return False  # short replies ("agreed", "on it") legitimately recur
+        recent = [m.text for m in reversed(self.messages) if m.author == author][:REPEAT_LOOKBACK]
+        return any(difflib.SequenceMatcher(None, text[:1500], old[:1500]).ratio() >= REPEAT_SIMILARITY for old in recent)
 
     async def _apply(self, agent: Agent, actions: Actions) -> None:
         if actions.whiteboard is not None:

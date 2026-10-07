@@ -16,12 +16,13 @@ from pathlib import Path
 import httpx
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from .agents import DEFAULT_ROSTER, EXTRA_ROSTER, Agent, AgentError
 from .llm import Backend, MockBackend, RoutingBackend, quota_used_up
 from .providers import MODEL_HINTS, PROVIDERS, adapt_body, auth_headers, candidate_models, list_models, pick_model
 from .room import HUMAN, Room
+from .codeexport import code_zip
 from .rooms import RoomStore, export_markdown, valid_room_id
 from .search import Searcher, make_searcher
 from .teams import TeamError, TeamStore
@@ -340,6 +341,21 @@ def create_app(
             export_markdown(state),
             media_type="text/markdown; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="agent-collab-{room_id}.md"'},
+        )
+
+    @app.get("/api/rooms/{room_id}/code.zip")
+    async def export_code(room_id: str) -> Response:
+        if not valid_room_id(room_id):
+            raise HTTPException(400, "invalid room id")
+        state = rooms[room_id].to_state() if room_id in rooms else store.load(room_id)
+        if not state:
+            raise HTTPException(404, "no such room")
+        data = code_zip(state)
+        if data is None:
+            raise HTTPException(404, "no code in this room yet")
+        return Response(
+            data, media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{room_id}-code.zip"'},
         )
 
     @app.delete("/api/rooms/{room_id}")

@@ -231,3 +231,71 @@ def test_make_searcher_selection(monkeypatch):
 
 def test_format_results():
     assert format_results("x", []) == 'No results for "x".'
+
+
+def test_whiteboard_tag_echo_counts_as_an_update():
+    from agent_collab.actions import extract_actions
+
+    text, actions = extract_actions("<whiteboard>\n# Plan\n- ship it\n</whiteboard>\n\nDone, @Tesla your turn.", ("whiteboard",))
+    assert actions.whiteboard == "# Plan\n- ship it"
+    assert text == "[updated the whiteboard]\n\nDone, @Tesla your turn."
+
+
+def test_agents_are_told_they_cannot_push_or_run_code():
+    from agent_collab.agents import DEFAULT_ROSTER
+
+    prompt = DEFAULT_ROSTER[0].system_prompt(DEFAULT_ROSTER)
+    assert "cannot run or test code" in prompt and "pushed" in prompt
+
+
+def test_code_export_names_files_and_keeps_the_latest_version():
+    import io
+    import zipfile
+
+    from agent_collab.codeexport import code_zip, collect_files
+
+    msgs = [
+        {"author": "Tesla", "text": "First cut:\n```csharp\n// Entity.cs\nclass Entity {}\n```"},
+        {"author": "Human", "text": "```python\n# mine.py\nignored = True\n```"},
+        {"author": "Turing", "text": "**`Player.cs`**\n```csharp\nclass Player {}\n```\nand\n```bash\ngit push\n```"},
+        {"author": "Tesla", "text": "Fixed:\n```cs\n// Entity.cs\nclass Entity { int z; }\n```\n```whiteboard\nnot code\n```"},
+        {"author": "Curie", "text": "```js\n// ../../etc/passwd.js\nevil()\n```"},
+    ]
+    files, authors = collect_files({"messages": msgs})
+    assert files["Entity.cs"] == "// Entity.cs\nclass Entity { int z; }\n" and authors["Entity.cs"] == "Tesla"
+    assert files["Player.cs"] == "class Player {}\n"
+    assert "snippets/001-turing.sh" in files and "mine.py" not in files
+    assert not any(".." in p for p in files)  # path traversal never reaches the zip
+    z = zipfile.ZipFile(io.BytesIO(code_zip({"id": "r", "messages": msgs})))
+    assert "README.md" in z.namelist() and "Entity.cs" in z.namelist()
+    assert code_zip({"id": "r", "messages": [{"author": "Tesla", "text": "no code"}]}) is None
+
+
+def test_near_repeat_replies_are_dropped():
+    import asyncio
+
+    from agent_collab.agents import Agent
+    from agent_collab.llm import Bid
+    from agent_collab.room import Room, RoomSettings
+
+    pitch = "I'd like to suggest that we implement a simple animation system for the skill effects, using AnimationPlayer nodes."
+
+    class Parrot:
+        async def bid(self, agent, roster, transcript, whiteboard=""):
+            return Bid(urgency=0.9 if agent.name == "Curie" else 0.0, reason="")
+
+        async def speak(self, agent, roster, transcript, whiteboard=""):
+            yield pitch
+
+    async def go():
+        room = Room("r", [Agent("Curie", "r", ""), Agent("Bo", "b", "")], Parrot(), RoomSettings(max_agent_turns=3, dominance_penalty=0))
+        q = room.subscribe()
+        await room.post_human("ideas?")
+        await room.wait_idle()
+        await room.post_human("anything else?")
+        await room.wait_idle()
+        return room, [q.get_nowait() for _ in range(q.qsize())]
+
+    room, events = asyncio.run(go())
+    assert [m.author for m in room.messages] == ["Human", "Curie", "Human"]  # the pitch once, not twice
+    assert any(e["type"] == "notice" and "repeated an earlier message" in e["text"] for e in events)
