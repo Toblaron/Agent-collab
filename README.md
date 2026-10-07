@@ -100,6 +100,11 @@ How non-Claude agents work:
   one per second, so it's paced from the start); any provider that answers "429 slow down" is
   automatically slowed further, honouring `Retry-After`, then eased back. A rate-limited speaker
   gets a second try after a short pause instead of being skipped.
+- **Small token limits.** Some free models cap how many tokens one request may use (Groq's
+  `gpt-oss-120b`: 8,000 per minute, reply included). Requests to Groq are trimmed to fit up
+  front, and if any provider answers "request too large", the agent learns that model's limit,
+  shows the room fewer and shorter recent messages, and retries. The whiteboard keeps the key
+  points either way.
 - **Provider fallback.** If the second try is refused too, that provider is out for a while, so
   the agent moves to another provider that passed the startup check (the one with the fewest
   agents), with a notice in the chat. Use **[edit]** to move them back later. When a speaker

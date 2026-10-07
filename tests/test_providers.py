@@ -722,3 +722,74 @@ def test_check_note_names_the_retired_default(monkeypatch):
     check = server.check_provider("groq")
     assert check.ok and check.model == "openai/gpt-oss-120b"
     assert check.note == "ok (using openai/gpt-oss-120b; llama-3.3-70b-versatile is no longer offered)"
+
+
+GROQ_413 = ("Request too large for model `openai/gpt-oss-120b` in organization `org_x` service tier `on_demand` on "
+            "tokens per minute (TPM): Limit 8000, Requested 9849, please reduce your message size and try again. "
+            "Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing")
+
+
+def test_token_cap_reads_request_too_large_errors():
+    from agent_collab.llm import token_cap
+
+    def err(status, msg):
+        return httpx.Response(status, json={"error": {"message": msg}})
+
+    assert token_cap(err(413, GROQ_413)) == (8000, True)
+    assert token_cap(groq_429(GROQ_TPM)) is None  # a busy minute, not an oversized request
+    assert token_cap(err(400, "This model's maximum context length is 8192 tokens. However, you requested 9000")) == (8192, False)
+    assert token_cap(err(500, GROQ_413)) is None
+
+
+def _long_room(n=40, size=1500):
+    from agent_collab.agents import Message
+
+    return [Message(author="Turing" if i % 2 else "Human", text=f"point {i}: " + "x" * size) for i in range(n)]
+
+
+def test_oversized_request_is_trimmed_and_retried(monkeypatch):
+    from agent_collab.agents import Agent
+
+    seen = []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        if len(seen) == 1:
+            return httpx.Response(413, json={"error": {"message": GROQ_413}})
+        sse = f"data: {json.dumps({'choices': [{'delta': {'content': 'fits now'}}]})}\n\ndata: [DONE]\n\n"
+        return httpx.Response(200, text=sse, headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setenv("CUSTOM_LLM_BASE_URL", "http://fake/v1")
+    backend = OpenAICompatBackend(httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    tesla = Agent("Tesla", "builder", "", provider="custom", model="openai/gpt-oss-120b")
+
+    async def go():
+        return "".join([c async for c in backend.speak(tesla, [tesla], _long_room())])
+
+    assert asyncio.run(go()) == "fits now"
+    first, second = (len(b["messages"][1]["content"]) + len(b["messages"][0]["content"]) for b in seen)
+    assert second < first
+    assert (second / 3.0) + seen[1]["max_tokens"] <= 8000 * 0.6  # fits the learned per-minute limit with headroom
+    assert "point 39" in seen[1]["messages"][1]["content"]  # the latest messages are kept
+    assert "point 0:" not in seen[1]["messages"][1]["content"]
+
+
+def test_groq_requests_are_trimmed_before_the_first_error(monkeypatch):
+    from agent_collab.agents import Agent
+    from agent_collab.llm import DEFAULT_TOKEN_CAPS
+
+    seen = []
+    backend = OpenAICompatBackend(fake_provider('{"urgency": 0.5, "reason": "x"}', ["ok"], seen))
+    tesla = Agent("Tesla", "builder", "", provider="groq", model="openai/gpt-oss-120b")
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+
+    async def go():
+        await backend.bid(tesla, [tesla], _long_room())
+        return "".join([c async for c in backend.speak(tesla, [tesla], _long_room())])
+
+    assert asyncio.run(go()) == "ok"
+    tokens, _ = DEFAULT_TOKEN_CAPS["groq"]
+    for s in seen:
+        chars = sum(len(m["content"]) for m in s["body"]["messages"])
+        assert chars / 3.0 + s["body"]["max_tokens"] <= tokens * 0.6

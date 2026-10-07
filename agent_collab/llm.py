@@ -24,7 +24,7 @@ except ImportError:  # pragma: no cover - exercised on installs without the extr
     anthropic = None
 from pydantic import BaseModel, Field
 
-from .agents import Agent, Message, render_transcript
+from .agents import MAX_MESSAGE_CHARS, TRANSCRIPT_WINDOW, Agent, Message, render_transcript
 from .providers import PROVIDERS, ProviderSpec, adapt_body, auth_headers, candidate_models
 
 BID_EFFORT = os.environ.get("AGENT_COLLAB_BID_EFFORT", "low")
@@ -66,12 +66,44 @@ JSON_BID_SUFFIX = (
 SPEAK_INSTRUCTIONS = "Above is the conversation so far. It is your turn. Write only your next message, as {name}, with no name prefix."
 
 
-def _prompt(transcript: list[Message], instructions: str, whiteboard: str = "") -> str:
+def _prompt(
+    transcript: list[Message], instructions: str, whiteboard: str = "",
+    window: int = TRANSCRIPT_WINDOW, max_chars: int = MAX_MESSAGE_CHARS,
+) -> str:
     board = whiteboard.strip() or "(empty)"
+    if max_chars < MAX_MESSAGE_CHARS and len(board) > max_chars * 2:  # only when squeezing into a small limit
+        board = board[: max_chars * 2] + "\n…(whiteboard truncated)"
     return (
         f"<whiteboard>\n{board}\n</whiteboard>\n\n"
-        f"<transcript>\n{render_transcript(transcript)}\n</transcript>\n\n{instructions}"
+        f"<transcript>\n{render_transcript(transcript, window, max_chars)}\n</transcript>\n\n{instructions}"
     )
+
+
+# Ever-smaller views of the room, tried in order until a request fits a model's token limit:
+# (messages shown, max characters per message).
+SHRINK_STEPS = ((TRANSCRIPT_WINDOW, MAX_MESSAGE_CHARS), (24, 2000), (16, 1500), (10, 1200), (6, 1000), (4, 800), (2, 600))
+CHARS_PER_TOKEN = 3.0  # deliberately low (real text is ~4): overestimating tokens is the safe side
+# Free tiers with small per-request token limits, assumed until a provider tells us the exact number.
+# (tokens, per_minute). Groq's free models allow 6k-12k tokens per minute *including* the reply.
+DEFAULT_TOKEN_CAPS = {"groq": (8000, True)}
+_CAP_RE = re.compile(r"limit:?\s*(\d+),.*?requested:?\s*(\d+)", re.S)
+_CTX_RE = re.compile(r"maximum context length is\s*(\d+)")
+
+
+def token_cap(r: httpx.Response) -> tuple[int, bool] | None:
+    """The token limit a 'request too large' error names, as (tokens, per_minute), or None
+    when the error isn't about request size. Groq: 'Limit 8000, Requested 9849';
+    OpenAI-style servers: 'maximum context length is 8192 tokens'."""
+    if r.status_code not in (400, 413, 429):
+        return None
+    text = r.text.lower()
+    m = _CAP_RE.search(text)
+    if m and int(m.group(2)) > int(m.group(1)):  # a request that can never fit, not a busy minute
+        return int(m.group(1)), "per minute" in text or "tpm" in text
+    m = _CTX_RE.search(text)
+    if m:
+        return int(m.group(1)), False
+    return None
 
 
 def _failed_bid(reason: str) -> Bid:
@@ -258,6 +290,7 @@ class OpenAICompatBackend:
         self._pacers: dict[str, Pacer] = {}
         self._blocked: dict[tuple[str, str], float] = {}  # (provider, model) -> usable again at (monotonic)
         self._model_lists: dict[str, tuple[float, list[str]]] = {}  # provider -> (fetched at, ids)
+        self._caps: dict[tuple[str, str], tuple[int, bool]] = {}  # (provider, model) -> learned token limit
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -270,19 +303,52 @@ class OpenAICompatBackend:
             self._pacers[provider] = Pacer(BASE_INTERVALS.get(provider, 0.0))
         return self._pacers[provider]
 
-    def _request(self, agent: Agent, roster: list[Agent], user: str, **extra) -> tuple[ProviderSpec, dict]:
+    def _request(
+        self, agent: Agent, roster: list[Agent], transcript: list[Message], instructions: str, whiteboard: str,
+        *, max_tokens: int, **extra,
+    ) -> tuple[ProviderSpec, dict]:
         spec = PROVIDERS[agent.provider]
         if not spec.url:
             raise ProviderError(f"{spec.label} has no base URL configured")
+        system = agent.system_prompt(roster)
+        user, max_tokens = self._fit(agent, system, transcript, instructions, whiteboard, max_tokens)
         body = {
             "model": agent.model_id,
-            "messages": [
-                {"role": "system", "content": agent.system_prompt(roster)},
-                {"role": "user", "content": user},
-            ],
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "max_tokens": max_tokens,
             **extra,
         }
         return spec, adapt_body(agent.provider, body)
+
+    def _fit(
+        self, agent: Agent, system: str, transcript: list[Message], instructions: str, whiteboard: str, max_tokens: int
+    ) -> tuple[str, int]:
+        """Shrink the room's view (fewer, shorter messages) until the request fits the model's
+        token limit. A per-minute limit gets extra headroom so bids and replies can share it."""
+        cap = self._caps.get((agent.provider, agent.model_id)) or DEFAULT_TOKEN_CAPS.get(agent.provider)
+        if cap is None:
+            return _prompt(transcript, instructions, whiteboard), max_tokens
+        tokens, per_minute = cap
+        budget = int(tokens * (0.6 if per_minute else 0.9))
+        max_tokens = min(max_tokens, max(256, budget // 4))
+        room = (budget - max_tokens) * CHARS_PER_TOKEN - len(system)
+        for window, max_chars in SHRINK_STEPS:
+            user = _prompt(transcript, instructions, whiteboard, window, max_chars)
+            if len(user) <= room:
+                break
+        return user, max_tokens
+
+    def _learn_cap(self, agent: Agent, r: httpx.Response) -> bool:
+        """Remember a 'request too large' limit so this and every later request fits. True if learned."""
+        cap = token_cap(r)
+        if cap is None:
+            return False
+        key = (agent.provider, agent.model_id)
+        known = self._caps.get(key) or DEFAULT_TOKEN_CAPS.get(agent.provider)
+        if known and known[0] <= cap[0]:
+            cap = (int(known[0] * 0.7), cap[1])  # already fitting to this limit and still too big: tighten
+        self._caps[key] = cap
+        return True
 
     def _note(self, provider: str, r: httpx.Response) -> None:
         """Feed every response into the provider's pacer."""
@@ -323,18 +389,20 @@ class OpenAICompatBackend:
     async def bid(self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = "") -> Bid:
         pacer = self.pacer(agent.provider)
         try:
-            spec, body = self._request(
-                agent, roster,
-                _prompt(transcript, BID_INSTRUCTIONS.format(name=agent.name) + JSON_BID_SUFFIX, whiteboard),
-                temperature=0.2, max_tokens=1024,  # roomy enough for models that think out loud first
-            )
-            for delay in (*self.RETRY_DELAYS[:1], None):  # bids are cheap: retry once, the room has a deadline
-                await pacer.wait()
-                r = await self.client.post(f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec))
-                self._note(agent.provider, r)
-                if r.status_code not in self.RETRYABLE or delay is None or quota_used_up(r):
+            for attempt in range(2):  # a second attempt only after learning the model's size limit
+                spec, body = self._request(
+                    agent, roster, transcript, BID_INSTRUCTIONS.format(name=agent.name) + JSON_BID_SUFFIX, whiteboard,
+                    temperature=0.2, max_tokens=1024,  # roomy enough for models that think out loud first
+                )
+                for delay in (*self.RETRY_DELAYS[:1], None):  # bids are cheap: retry once, the room has a deadline
+                    await pacer.wait()
+                    r = await self.client.post(f"{spec.url}/chat/completions", json=body, headers=auth_headers(spec))
+                    self._note(agent.provider, r)
+                    if r.status_code not in self.RETRYABLE or delay is None or quota_used_up(r) or token_cap(r):
+                        break
+                    await asyncio.sleep(self._delay(delay, r))
+                if attempt or not self._learn_cap(agent, r):
                     break
-                await asyncio.sleep(self._delay(delay, r))
             if r.status_code == 429:
                 if quota_used_up(r):
                     self._block(agent, r)
@@ -351,12 +419,30 @@ class OpenAICompatBackend:
     async def speak(
         self, agent: Agent, roster: list[Agent], transcript: list[Message], whiteboard: str = ""
     ) -> AsyncIterator[str]:
-        spec, body = self._request(
-            agent, roster, _prompt(transcript, SPEAK_INSTRUCTIONS.format(name=agent.name), whiteboard),
-            temperature=0.7, max_tokens=2048, stream=True,
-        )
         pacer = self.pacer(agent.provider)
         think = ThinkFilter()
+        for attempt in range(2):  # a second attempt only after learning the model's size limit
+            spec, body = self._request(
+                agent, roster, transcript, SPEAK_INSTRUCTIONS.format(name=agent.name), whiteboard,
+                temperature=0.7, max_tokens=2048, stream=True,
+            )
+            shrink = False
+            async for chunk in self._speak_once(agent, spec, body, pacer, think, last_try=attempt == 1):
+                if chunk is None:
+                    shrink = True
+                    break
+                yield chunk
+            if not shrink:
+                break
+        tail = think.flush()
+        if tail:
+            yield tail
+
+    async def _speak_once(
+        self, agent: Agent, spec: ProviderSpec, body: dict, pacer: Pacer, think: "ThinkFilter", last_try: bool
+    ) -> AsyncIterator[str | None]:
+        """Stream one request (with busy/rate-limit retries). Yields None, and stops, when the
+        request was too large and a limit was learned: the caller rebuilds it smaller."""
         for delay in (*self.RETRY_DELAYS, None):
             await pacer.wait()
             async with self.client.stream(
@@ -365,6 +451,14 @@ class OpenAICompatBackend:
                 if r.status_code >= 400:
                     await r.aread()
                 self._note(agent.provider, r)
+                if not last_try and self._learn_cap(agent, r):
+                    yield None
+                    return
+                if token_cap(r):
+                    raise ProviderError(
+                        f"{spec.label}'s free limit for {agent.model_id} is too small for this conversation even "
+                        f"trimmed down. Use [edit] on {agent.name} to pick a model with a bigger limit."
+                    )
                 if r.status_code == 429 and quota_used_up(r):
                     self._block(agent, r)
                     raise ProviderError(unavailable_reason(r, spec.label, agent.model_id) + ".", model_unavailable=True)
@@ -378,11 +472,8 @@ class OpenAICompatBackend:
                 else:
                     async for chunk in self._stream_text(r, think):
                         yield chunk
-                    break
+                    return
             await asyncio.sleep(wait)
-        tail = think.flush()
-        if tail:
-            yield tail
 
     @staticmethod
     async def _stream_text(r: httpx.Response, think: "ThinkFilter") -> AsyncIterator[str]:

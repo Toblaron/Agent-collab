@@ -148,7 +148,7 @@ TRANSCRIPT_WINDOW = 40
 MAX_MESSAGE_CHARS = 4000
 
 
-def render_transcript(messages: list[Message], window: int = TRANSCRIPT_WINDOW) -> str:
+def render_transcript(messages: list[Message], window: int = TRANSCRIPT_WINDOW, max_chars: int = MAX_MESSAGE_CHARS) -> str:
     if not messages:
         return "(The room is empty. No one has spoken yet.)"
     shown = messages[-window:]
@@ -156,7 +156,7 @@ def render_transcript(messages: list[Message], window: int = TRANSCRIPT_WINDOW) 
     if len(messages) > len(shown):
         parts.append(f"(… {len(messages) - len(shown)} earlier messages not shown; the whiteboard has the key decisions …)")
     for m in shown:
-        text = m.text if len(m.text) <= MAX_MESSAGE_CHARS else m.text[:MAX_MESSAGE_CHARS] + " …(truncated)"
+        text = m.text if len(m.text) <= max_chars else m.text[:max_chars] + " …(truncated)"
         parts.append(f"[{m.author}]: {text}")
     return "\n\n".join(parts)
 
